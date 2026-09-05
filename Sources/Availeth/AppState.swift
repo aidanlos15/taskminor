@@ -1,0 +1,179 @@
+import AppKit
+import Combine
+import ServiceManagement
+
+/// Central wiring: owns the store and capture engine, exposes query helpers,
+/// and versions the data so views refresh when new spans land.
+final class AppState: ObservableObject {
+    static let shared = AppState()
+
+    let store: Store
+    let engine: CaptureEngine
+
+    /// Bumped whenever underlying data changes; views recompute on change.
+    @Published private(set) var dataVersion = 0
+
+    /// Cached top apps for today's live capture — read by the menu bar panel so
+    /// it never runs store queries during view rendering.
+    @Published private(set) var todayTopApps: [AppTotal] = []
+
+    /// Set to true to reopen the first-run welcome/permissions sheet.
+    @Published var welcomeRequested = false
+
+    /// True → dashboard shows the bundled demo dataset; false → live capture.
+    @Published var showDemo: Bool {
+        didSet { UserDefaults.standard.set(showDemo, forKey: "availeth.showDemo") }
+    }
+
+    /// Loaded labour rate used for $ estimates.
+    @Published var hourlyRate: Double {
+        didSet { UserDefaults.standard.set(hourlyRate, forKey: "availeth.hourlyRate") }
+    }
+
+    let synthesizer: Synthesizer
+
+    private var cancellables: Set<AnyCancellable> = []
+    private var synthTimer: Timer?
+
+    private init() {
+        let store = Store(url: Store.defaultURL())
+        self.store = store
+        self.engine = CaptureEngine(store: store)
+        self.synthesizer = Synthesizer(store: store, interpreter: OllamaInterpreter())
+
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "availeth.showDemo") == nil {
+            // First launch: show the demo dataset so the dashboard is alive immediately.
+            showDemo = true
+        } else {
+            showDemo = defaults.bool(forKey: "availeth.showDemo")
+        }
+        let rate = defaults.double(forKey: "availeth.hourlyRate")
+        hourlyRate = rate > 0 ? rate : 45
+
+        engine.onSpanSaved = { [weak self] in
+            DispatchQueue.main.async {
+                self?.dataVersion += 1
+                self?.refreshTodayTopApps()
+            }
+        }
+        engine.onScreenshotSaved = { [weak self] in
+            DispatchQueue.main.async { self?.dataVersion += 1 }
+        }
+        engine.onIdleRecorded = { [weak self] in
+            DispatchQueue.main.async { self?.dataVersion += 1 }
+        }
+        // Forward engine changes (pause state, current app) to our observers.
+        engine.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+    }
+
+    func bootstrap() {
+        if store.spanCount(demo: true) == 0 {
+            store.insertBatch(DemoData.generate())
+        }
+        if store.narrativeCount(demo: true) == 0 {
+            DemoData.generateNarratives().forEach { store.insertNarrative($0) }
+        }
+        if store.idleSessions(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
+            DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
+        }
+        if store.taskSummaries(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
+            DemoData.seedSummaries(into: store)
+        }
+        // Honor a persisted Stop: capture never silently restarts after the
+        // user turned it off. (An expired pause resumes; an active one holds.)
+        if engine.shouldObserveOnLaunch {
+            engine.start()
+        }
+        if engine.screenshotMode == .storyline {
+            engine.refreshInterpreterStatus()
+        }
+        dataVersion += 1
+        refreshTodayTopApps()
+
+        // Periodically fuse raw signals into minute → task summaries (local model).
+        let t = Timer(timeInterval: 90, repeats: true) { [weak self] _ in self?.runSynthesis() }
+        RunLoop.main.add(t, forMode: .common)
+        synthTimer = t
+        runSynthesis()
+    }
+
+    private func runSynthesis() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.synthesizer.run()
+            await MainActor.run { self.dataVersion += 1 }
+        }
+    }
+
+    private func refreshTodayTopApps() {
+        let dayStart = Calendar.current.startOfDay(for: Date())
+        let spans = store.spans(from: dayStart, to: Date().addingTimeInterval(60), demo: false)
+        todayTopApps = Array(Analytics.timeByApp(spans).prefix(3))
+    }
+
+    // MARK: - Queries
+
+    func spans(in range: TimeRange) -> [ActivitySpan] {
+        store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: showDemo)
+    }
+
+    var liveSpanCount: Int { store.spanCount(demo: false) }
+
+    // MARK: - Data management
+
+    func deleteLiveData() {
+        store.deleteLiveData()
+        engine.purgeAllLiveScreenshots()
+        store.deleteSummaries(scope: .live)
+        store.deleteIdleSessions(scope: .live)
+        engine.discardCurrentAndRefresh()
+        dataVersion += 1
+        refreshTodayTopApps()
+    }
+
+    func resetDemoData() {
+        store.deleteAll(demoOnly: true)
+        store.deleteNarratives(scope: .demo)
+        store.deleteIdleSessions(scope: .demo)
+        store.deleteSummaries(scope: .demo)
+        store.insertBatch(DemoData.generate())
+        DemoData.generateNarratives().forEach { store.insertNarrative($0) }
+        DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
+        DemoData.seedSummaries(into: store)
+        dataVersion += 1
+    }
+
+    // MARK: - Story queries
+
+    func taskSummaries(in range: TimeRange) -> [TaskSummary] {
+        store.taskSummaries(from: range.startDate(), to: Date().addingTimeInterval(60), demo: showDemo)
+    }
+
+    func minutes(forTask id: Int64) -> [MinuteSummary] {
+        store.minutesForTask(id)
+    }
+
+    // MARK: - Launch at login
+
+    var launchAtLoginEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) -> String? {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            objectWillChange.send()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+}

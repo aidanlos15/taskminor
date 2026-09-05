@@ -1,0 +1,20 @@
+# Build artifacts
+.build/
+*.o
+*.swiftmodule
+
+# Built app bundle (produced by scripts/build_app.sh)
+Availeth.app/
+
+# macOS
+.DS_Store
+
+# Xcode / SwiftPM
+*.xcodeproj
+.swiftpm/
+Package.resolved
+
+# Local data / scratch
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
