@@ -15,6 +15,8 @@ struct PrivacyView: View {
     @State private var showAddExclusion = false
     @State private var exclusionSearch = ""
     @State private var hoveredApp: String?
+    @StateObject private var installer = ModelInstaller()
+    @State private var daemonRunning = false
 
     private var dataSummary: String {
         var parts = ["\(liveSpanCount) activity records"]
@@ -276,7 +278,8 @@ struct PrivacyView: View {
             screenRecordingGranted = Permissions.screenRecordingGranted
             inputMonitoringGranted = Permissions.inputMonitoringGranted
         }
-        .onAppear { state.engine.refreshInterpreterStatus() }
+        .onAppear { refreshDaemon() }
+        .onChange(of: installer.state) { if installer.state == .done { refreshDaemon() } }
     }
 
     // MARK: - Local AI
@@ -297,23 +300,64 @@ struct PrivacyView: View {
 
             if !state.engine.textModelReady || !state.engine.interpreterReady {
                 hairline
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("To set up: install Ollama, then run whichever you want.")
-                        .font(.caption).foregroundStyle(Theme.ink2)
-                    Text("ollama pull \(state.engine.textModelName)\nollama pull \(state.engine.visionModelName)")
-                        .font(.system(.caption, design: .monospaced)).foregroundStyle(Theme.ink)
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Theme.panelHi, in: RoundedRectangle(cornerRadius: 6))
-                    HStack(spacing: 10) {
-                        Link("Get Ollama", destination: URL(string: "https://ollama.com/download")!)
-                        Button("Check again") { state.engine.refreshInterpreterStatus() }
+                if daemonRunning {
+                    installProgress
+                } else {
+                    // The service itself is missing. It is a 196 MB download and
+                    // installs like any other Mac app; the models come after, in
+                    // the app, with a progress bar.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Availeth needs Ollama, the free service that runs the models on this Mac. Install it once, then Availeth fetches the models it needs here.")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Link("Download Ollama (196 MB)", destination: URL(string: "https://ollama.com/download")!)
+                            Button("Check again") { refreshDaemon() }
+                        }
+                        .font(.caption).controlSize(.small)
                     }
-                    .font(.caption).controlSize(.small)
                 }
             }
         }
+    }
+
+    /// Download progress, or a button per missing model. No terminal.
+    @ViewBuilder
+    private var installProgress: some View {
+        switch installer.state {
+        case .pulling(let percent, let detail):
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Downloading \(installer.model)").font(.caption.weight(.medium)).foregroundStyle(Theme.ink)
+                ProgressView(value: percent).progressViewStyle(.linear).tint(Theme.accent)
+                HStack {
+                    Text(detail).font(.caption2).foregroundStyle(Theme.ink2)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }.controlSize(.small).font(.caption2)
+                }
+            }
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(message).font(.caption).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                Button("Try again") { refreshDaemon() }.controlSize(.small).font(.caption)
+            }
+        case .done, .idle:
+            HStack(spacing: 10) {
+                if !state.engine.textModelReady {
+                    Button("Install text model (1.9 GB)") { installer.pull(state.engine.textModelName) }
+                        .buttonStyle(.borderedProminent).tint(Theme.accent)
+                }
+                if !state.engine.interpreterReady {
+                    Button("Install vision model (6.0 GB)") { installer.pull(state.engine.visionModelName) }
+                }
+                Spacer()
+            }
+            .controlSize(.small).font(.caption)
+        }
+    }
+
+    private func refreshDaemon() {
+        state.engine.refreshInterpreterStatus()
+        Task { daemonRunning = await ModelInstaller.daemonRunning() }
     }
 
     private func modelStatusLine(ready: Bool, title: String, name: String, size: String, need: String) -> some View {

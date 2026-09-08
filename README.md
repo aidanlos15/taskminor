@@ -61,6 +61,28 @@ scripts/build_app.sh               # builds, signs, installs to /Applications
 open -a /Applications/Availeth.app
 ```
 
+## Packaging a release
+
+```bash
+scripts/package_release.sh                                  # self-signed, internal
+IDENTITY="Developer ID Application: … (TEAMID)" \
+NOTARY_PROFILE=availeth scripts/package_release.sh          # for customers
+```
+
+Produces `build/Availeth.dmg`: the app beside an Applications shortcut, the way
+a consumer app arrives. The release build maps build paths out of the binary and
+strips its symbol table, so it carries no developer paths and no type or function
+names. Swift compiles to machine code, so the source itself is never in the
+bundle.
+
+Until it is signed with a Developer ID and notarized, macOS warns on first open
+and `spctl --assess` reports "rejected". Create the notary profile once:
+
+```bash
+xcrun notarytool store-credentials availeth --apple-id you@availeth.io \
+  --team-id TEAMID --password <app-specific-password>
+```
+
 Run `make_signing_identity.sh` first. Without that certificate the app is signed
 ad-hoc, its code identity changes on every build, and macOS silently drops the
 Accessibility, Screen Recording and Input Monitoring grants each time you
@@ -101,11 +123,12 @@ scripts/build_app.sh              builds, signs and installs Availeth.app
 
 - Self-signed for local use. Distribution needs a Developer ID certificate,
   Hardened Runtime, and notarization.
-- Screen capture needs Ollama running locally with the vision model pulled
-  (`ollama pull qwen2.5vl:7b`, 6.0 GB). Without it the switch reports the model
-  missing and no frames are captured. Written task stories need only the text
-  model (`ollama pull qwen2.5:3b`, 1.9 GB); without either, stories are built
-  from the signals.
+- The models are fetched from inside the app. Ollama itself (196 MB, MIT) is a
+  one-off install the Privacy tab links to; the models are then pulled there with
+  a progress bar. They are not in the download because the text model is 1.9 GB
+  and the vision model 6.0 GB, and an app that costs six gigabytes before it
+  shows anything does not get installed. Without either model, task stories are
+  still built from the captured signals.
 - Signed with a local self-signed identity, so Gatekeeper refuses it on any
   other Mac until it is signed with a Developer ID and notarized.
 - Window-title capture degrades gracefully: without Accessibility, spans carry
