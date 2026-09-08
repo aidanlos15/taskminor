@@ -5,6 +5,7 @@ struct WorkflowsView: View {
     var range: TimeRange
 
     @State private var insights: [WorkflowInsight] = []
+    @State private var sharing: FindingsReport?
     @State private var selected: WorkflowInsight?
     @State private var reloadTask: Task<Void, Never>?
 
@@ -31,6 +32,7 @@ struct WorkflowsView: View {
             .padding(20)
         }
         .scrollContentBackground(.hidden)
+        .sheet(item: $sharing) { ShareFindingsSheet(report: $0) }
         .onAppear(perform: reload)
         .onChange(of: range) { reload() }
         .onChange(of: state.showDemo) { reload() }
@@ -109,6 +111,27 @@ struct WorkflowsView: View {
                         .font(.system(size: 10.5))
                         .foregroundStyle(Theme.ink3)
                         .multilineTextAlignment(.trailing)
+                }
+            }
+
+            // The handover, and Availeth's offer. Only appears once there is
+            // something real to send.
+            if insights.contains(where: { $0.automatable }) {
+                Rectangle().fill(Theme.line).frame(height: 1).padding(.vertical, 4)
+                HStack(spacing: 12) {
+                    Image(systemName: "gift.fill").foregroundStyle(Theme.accent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Availeth builds the first one free")
+                            .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.ink)
+                        Text("Send the summary and Availeth builds the automation for the workflow you pick. You read exactly what leaves this Mac first.")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Button("Review and send…") {
+                        sharing = FindingsReport.build(from: insights, spans: state.spans(in: range))
+                    }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent).controlSize(.small)
                 }
             }
         }

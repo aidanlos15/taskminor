@@ -122,9 +122,14 @@ final class AppState: ObservableObject {
         if store.taskSummaries(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
             DemoData.seedSummaries(into: store)
         }
-        // Honor a persisted Stop: capture never silently restarts after the
-        // user turned it off. (An expired pause resumes; an active one holds.)
-        if engine.shouldObserveOnLaunch {
+        // Consent before capture. On a first launch the welcome sheet is about to
+        // appear, and starting to record behind it meant the database already held
+        // the person's activity while the consent screen sat unanswered. Capture
+        // waits for that sheet; on every later launch it behaves as before, and a
+        // persisted Stop is still honoured (an expired pause resumes, an active
+        // one holds).
+        let onboarded = UserDefaults.standard.bool(forKey: WelcomeSheet.onboardedKey)
+        if onboarded && engine.shouldObserveOnLaunch {
             engine.start()
         }
         // Always check, not only in storyline mode: the story layer needs the
