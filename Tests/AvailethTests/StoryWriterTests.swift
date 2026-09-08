@@ -96,12 +96,19 @@ final class StoryWriterTests: XCTestCase {
         XCTAssertNotNil(StoryWriter.acceptEntry("Pasted an address into the To field of an email in Mail.", record: noMove))
     }
 
-    func testEntryCompletingACutTitleIsRejected() {
-        let cut = StoryWriter.minuteRecord(spans: [span("Code", "Stampede.ai graphics ren…", fields: "Search")], transfers: [], narratives: [])
-        _ = cut
-        let r = StoryWriter.minuteRecord(spans: [span("Code", "Stampede.ai graphics ren…", fields: "Name")], transfers: [], narratives: [])
+    /// VS Code cuts a chat tab's title mid-way ("…ren… — astra"); the model
+    /// must not finish the word, and must not break a name at its dot.
+    func testEntryCompletingACutTitleOrManglingANameIsRejected() {
+        let r = StoryWriter.minuteRecord(spans: [span("Code", "Stampede.ai graphics ren… — astra", fields: "Name")], transfers: [], narratives: [])
         XCTAssertNil(StoryWriter.acceptEntry("Edited the Stampede.ai graphics rename file in Code and typed a Name.", record: r))
+        XCTAssertNil(StoryWriter.acceptEntry("Edited Stampede. ai graphics ren… in Code and typed a Name.", record: r))
         XCTAssertNotNil(StoryWriter.acceptEntry("Edited Stampede.ai graphics ren… in Code and typed a Name.", record: r))
+    }
+
+    func testLengthWordsMatchTheMinutes() {
+        XCTAssertEqual(StoryWriter.lengthWords(minutes: 7), "a few minutes")
+        XCTAssertEqual(StoryWriter.lengthWords(minutes: 20), "about a quarter of an hour")
+        XCTAssertEqual(StoryWriter.lengthWords(minutes: 30), "about half an hour")
     }
 
     func testChatOpenersAreStrippedAndLengthCapped() {
@@ -146,7 +153,7 @@ final class StoryWriterTests: XCTestCase {
         let r = StoryWriter.taskRecord(minutes: mins, transfers: [])
         let (_, story) = StoryWriter.acceptTitleAndStory("STORY: Edited main.swift in Code and checked figures in Microsoft Excel.\nTITLE: Swift edits", record: r)
         XCTAssertEqual(story, StoryWriter.plainStory(r))
-        XCTAssertTrue(story.hasPrefix("A few minutes, mostly in Code \"main.swift\", also Safari \"New chat - Claude\"."), story)
+        XCTAssertTrue(story.hasPrefix("A couple of minutes, mostly in Code \"main.swift\", also Safari \"New chat - Claude\"."), story)
     }
 
     func testNoModelStillYieldsTitleAndStory() {

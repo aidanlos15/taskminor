@@ -279,7 +279,8 @@ enum StoryWriter {
     }
 
     static func lengthWords(minutes n: Int) -> String {
-        n < 5 ? "a few minutes" : n < 20 ? "about a quarter of an hour" : n < 40 ? "about half an hour" : "the best part of an hour"
+        n < 4 ? "a couple of minutes" : n < 10 ? "a few minutes" : n < 22 ? "about a quarter of an hour"
+            : n < 40 ? "about half an hour" : "the best part of an hour"
     }
 
     static func taskRecord(minutes: [MinuteSummary], transfers: [Transfer]) -> TaskRecord {
@@ -507,6 +508,7 @@ enum StoryWriter {
             for prefix in cutTitles(in: record) where completes(prefix, in: out) {
                 problems.append("completes the cut title \"\(prefix)…\""); break
             }
+            if mangledDot(in: out) { problems.append("splits a name at a full stop") }
             for sentence in sentences(out) {
                 let ws = words(sentence)
                 for (i, w) in ws.enumerated() where i > 0 && w.first!.isUppercase {
@@ -544,6 +546,17 @@ enum StoryWriter {
             }
         }
 
+        /// ". a" inside a sentence: the model has broken "Stampede.ai" into
+        /// "Stampede. ai". A real sentence never starts with a lowercase letter.
+        static func mangledDot(in s: String) -> Bool {
+            var previous: Character = " ", beforeThat: Character = " "
+            for ch in s {
+                if previous == " ", beforeThat == ".", ch.isLowercase { return true }
+                beforeThat = previous; previous = ch
+            }
+            return false
+        }
+
         static func numbers(in s: String) -> [String] {
             var out: [String] = []
             var current = ""
@@ -554,12 +567,15 @@ enum StoryWriter {
             return out
         }
 
-        /// The text before each "…" inside quotes in the record.
+        /// The text before each "…" inside a quoted title in the record. The
+        /// cut is usually mid-title ("Stampede.ai graphics ren… — astra"),
+        /// so the prefix is taken up to the first ellipsis, not the end.
         static func cutTitles(in record: String) -> [String] {
             var out: [String] = []
-            for part in record.split(separator: "\"") where part.hasSuffix("…") {
-                let prefix = String(part.dropLast())
-                if prefix.count >= 4 { out.append(prefix) }
+            for part in record.split(separator: "\"") {
+                guard let dots = part.firstIndex(of: "…") else { continue }
+                let prefix = String(part[..<dots])
+                if prefix.count >= 4, !out.contains(prefix) { out.append(prefix) }
             }
             return out
         }
