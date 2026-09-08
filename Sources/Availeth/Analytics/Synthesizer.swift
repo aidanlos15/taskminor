@@ -197,8 +197,14 @@ final class Synthesizer {
 
         var prompt: String {
             var lines = [
-                "You are documenting ONE minute of an employee's work so a colleague could understand it and judge what could be automated.",
-                "Write 2–3 concrete sentences describing exactly what they did this minute. PRESERVE the specific details from the observations below — the exact screens/pages, form fields and their values, and any questions asked of AI tools. Do not generalise or drop specifics.",
+                "You are documenting ONE minute of work so a colleague could understand it and judge what could be automated.",
+                "Write 2–3 concrete sentences describing exactly what was done this minute. PRESERVE the specific details from the observations below — the exact screens/pages, form fields and their values, and any questions asked of AI tools. Do not generalise or drop specifics.",
+                // Window titles routinely contain the names of customers, staff
+                // and records. A model told it is describing "an employee" picks
+                // the nearest name and writes the account as though that person
+                // were the one being watched. It is not: it is a name inside
+                // their work.
+                "Never name the person doing the work and never guess who they are. Always call them \"the user\". Any personal name you see is data on their screen — a customer, a colleague, a record — not the person working.",
                 "",
                 "Apps/tabs: \(apps.joined(separator: ", "))",
             ]
@@ -496,7 +502,9 @@ final class Synthesizer {
     static func taskPrompt(group: [MinuteSummary], apps: [String]) -> String {
         let steps = group.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
         return """
-        These are consecutive minutes of one task an employee performed. Write a detailed account (4–6 sentences) of what they actually did, step by step, and the systems and data involved, so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
+        These are consecutive minutes of one task. Write a detailed account (4–6 sentences) of what was actually done, step by step, and the systems and data involved, so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
+
+        Never name the person doing the work and never guess who they are. Always call them "the user". Any personal name in the minutes is data on their screen — a customer, a colleague, a record — not the person working. The title must not contain a personal name.
 
         Apps involved: \(apps.joined(separator: ", "))
         Minute-by-minute:
