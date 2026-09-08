@@ -64,8 +64,13 @@ final class AppState: ObservableObject {
 
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "availeth.showDemo") == nil {
-            // First launch: show the demo dataset so the dashboard is alive immediately.
-            showDemo = true
+            // The very first intro only: the sample dataset stands in so the
+            // dashboard is not empty before anything has been observed. Once
+            // onboarding is finished it switches to real activity and stays
+            // there; after that the sample is only reachable from the Privacy
+            // tab, so nobody mistakes a made-up finance department for their own
+            // work.
+            showDemo = !defaults.bool(forKey: WelcomeSheet.onboardedKey)
         } else {
             showDemo = defaults.bool(forKey: "availeth.showDemo")
         }
@@ -74,6 +79,13 @@ final class AppState: ObservableObject {
 
         // Default to Light on first launch; honor the saved choice thereafter.
         themeMode = (defaults.string(forKey: "availeth.theme")).flatMap(ThemeMode.init) ?? .light
+
+        // The engine republishes the open span about once a second; forward that
+        // to the views so totals and lists move in real time.
+        engine.$liveSpan
+            .removeDuplicates { $0?.end == $1?.end }
+            .sink { [weak self] _ in self?.dataVersion += 1 }
+            .store(in: &cancellables)
 
         engine.onSpanSaved = { [weak self] in
             DispatchQueue.main.async {
@@ -112,9 +124,9 @@ final class AppState: ObservableObject {
         if engine.shouldObserveOnLaunch {
             engine.start()
         }
-        if engine.screenshotMode == .storyline {
-            engine.refreshInterpreterStatus()
-        }
+        // Always check, not only in storyline mode: the story layer needs the
+        // text model regardless, and the Privacy tab has to show its real state.
+        engine.refreshInterpreterStatus()
         dataVersion += 1
         refreshTodayTopApps()
 
@@ -141,8 +153,14 @@ final class AppState: ObservableObject {
 
     // MARK: - Queries
 
+    /// Stored spans plus the one in progress, so the dashboard shows the current
+    /// app growing rather than freezing until the next app switch writes a row.
     func spans(in range: TimeRange) -> [ActivitySpan] {
-        store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: showDemo)
+        var out = store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: showDemo)
+        if !showDemo, let live = engine.liveSpan, live.end > range.startDate() {
+            out.append(live)
+        }
+        return out
     }
 
     var liveSpanCount: Int { store.spanCount(demo: false) }

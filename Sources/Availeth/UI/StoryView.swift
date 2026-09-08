@@ -22,8 +22,10 @@ struct StoryView: View {
                             icon: "book.closed",
                             title: "No story yet",
                             message: state.showDemo
-                                ? "The demo story is empty — reset the demo data in the Privacy tab."
-                                : "Availeth fuses your captured signals into task summaries every minute or two. Work normally for a few minutes (Storyline mode + the local model give the richest results), or switch to Demo data to see the finished shape."
+                                ? "The sample story is empty. Reset the sample data in the Privacy tab."
+                                : (state.engine.textModelReady
+                                   ? "Availeth turns what it captures into task summaries every minute or two. Work normally for a few minutes, or turn on the sample data in the Privacy tab to see the finished shape."
+                                   : "Availeth turns what it captures into task summaries every minute or two. No local text model is installed, so each task will be described from its signals rather than written up. Set one up in the Privacy tab under Local AI.")
                         )
                     }
                 } else {
@@ -58,7 +60,7 @@ struct StoryView: View {
         let medium = tasks.filter { $0.automatable.hasPrefix("Medium") }.count
         return Card(title: "Work Story", subtitle: "signals → narrative") {
             HStack(alignment: .center, spacing: 20) {
-                Text("Your captured signals — screens, apps, keystrokes, shortcuts, fields — fused into what you actually did, and what a bot could do instead.")
+                Text("Screens, apps, keystrokes, shortcuts and fields, turned into what you actually did and what a bot could do instead.")
                     .font(.system(size: 12.5))
                     .foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -88,7 +90,7 @@ struct StoryView: View {
     }
 
     private var disclaimer: some View {
-        Text("Task stories and automation reads are generated locally from observed signals and are candidates for a human to validate — not a measure of how productive anyone is. Away-from-keyboard time is excluded.")
+        Text("Task stories and automation reads are written on this Mac from what was observed, and a person should check them. They are not a measure of how productive anyone is. Time away from the keyboard is excluded.")
             .font(.system(size: 11)).foregroundStyle(Theme.ink3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)

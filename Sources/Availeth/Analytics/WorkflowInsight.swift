@@ -220,7 +220,7 @@ enum WorkflowInsighter {
             return ("This looks mostly like \(cognitive) — the kind of judgement and thinking work a person does, not a mechanical task. It isn't a strong automation candidate. (An AI can *assist* here, but it can't run it unattended.)", false)
         }
         let apps = distinct(pattern.apps.map(shortApp))
-        return ("You repeat this move between \(apps.joined(separator: ", ")), but there's no sign of data being moved or forms being filled — so it looks like navigation or reading rather than a task to automate. Turn on Storyline (Privacy tab) to capture more detail, or treat this as low-priority.", false)
+        return ("You repeat this move between \(apps.joined(separator: ", ")), but nothing was moved and no forms were filled. It looks like reading or navigating rather than a task to automate. Turn on screen capture in the Privacy tab to capture more detail, or treat this as low priority.", false)
     }
 
     /// Field names that appear on at least half the occurrences, after stripping

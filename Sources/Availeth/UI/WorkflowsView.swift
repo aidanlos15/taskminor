@@ -18,7 +18,7 @@ struct WorkflowsView: View {
                         EmptyState(
                             icon: "arrow.triangle.branch",
                             title: "No repeated workflows detected yet",
-                            message: "Availeth looks for cross-app sequences that repeat at least 3 times. Give it a few days of observation, pick a longer range — or switch to Demo data to see what detection looks like."
+                            message: "Availeth looks for sequences across apps that repeat at least 3 times. Give it a few days, or pick a longer range. Or turn on the sample data in the Privacy tab to see what detection looks like."
                         )
                     }
                 } else {

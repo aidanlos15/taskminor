@@ -25,8 +25,8 @@ struct OverviewView: View {
                             icon: "binoculars",
                             title: "Nothing observed yet",
                             message: state.showDemo
-                                ? "The demo dataset is empty — reset it from the Privacy tab."
-                                : "Availeth is watching for activity. Work normally for a while, or switch to Demo data to explore the dashboard."
+                                ? "The sample dataset is empty. Reset it from the Privacy tab."
+                                : "Availeth is watching for activity. Work normally for a while, or turn on the sample data in the Privacy tab to explore the dashboard."
                         )
                     }
                 } else {

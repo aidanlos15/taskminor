@@ -157,7 +157,7 @@ struct WorkflowDetailView: View {
             Label("What happened, moment by moment", systemImage: "sparkles.rectangle.stack")
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundStyle(Theme.ink)
-            Text("One real run of this workflow — each frame is what a local vision model saw; the images auto-delete after 24h.")
+            Text("One real run of this workflow. Each frame is what a local vision model saw. The images are deleted after 24 hours.")
                 .font(.system(size: 11)).foregroundStyle(Theme.ink2)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 0) {
@@ -196,13 +196,13 @@ struct WorkflowDetailView: View {
                 Label("No screen detail for these runs yet", systemImage: "clock.arrow.circlepath")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text("Storyline is on, but no screen captures are attached to this workflow's specific occurrences — either these runs happened before you enabled Storyline, or they were too brief to sample. It fills in as the workflow recurs from here.")
+                Text("Screen capture is on, but no captures are attached to these runs of the workflow. Either they happened before you turned it on, or they were too brief to sample. It fills in as the workflow recurs from here.")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
             } else {
                 Label("Turn on Storyline for screenshots", systemImage: "camera.viewfinder")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text("This workflow was detected from app and window activity. Enable Storyline in the Privacy tab (local vision model, images auto-deleted) and the next occurrences will include a screenshot-by-screenshot walkthrough of exactly what happened.")
+                Text("This workflow was found from app and window activity alone. Turn on screen capture in the Privacy tab and the next runs will include a screen-by-screen walkthrough of what happened.")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }
