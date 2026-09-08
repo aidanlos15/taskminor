@@ -9,10 +9,15 @@ struct WelcomeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     static let onboardedKey = "availeth.hasOnboarded"
+    /// Set the first time the three system prompts are fired, so they are raised
+    /// once and never again on later openings of this sheet.
+    static let promptedKey = "availeth.hasRequestedPermissions"
 
     @State private var axTrusted = AXReader.isTrusted
     @State private var screenGranted = Permissions.screenRecordingGranted
     @State private var inputGranted = Permissions.inputMonitoringGranted
+    /// Which system prompt is on screen right now, for the "asking now" line.
+    @State private var requesting: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,12 +38,13 @@ struct WelcomeSheet: View {
         .frame(width: 560, height: 680)
         .appCanvas()
         .tint(Theme.accent)
+        .task { await requestAllPermissionsOnce() }
         .task {
             while !Task.isCancelled {
                 axTrusted = AXReader.isTrusted
                 screenGranted = Permissions.screenRecordingGranted
                 inputGranted = Permissions.inputMonitoringGranted
-                if state.engine.screenshotMode == .storyline { state.engine.refreshInterpreterStatus() }
+                state.engine.refreshInterpreterStatus()
                 try? await Task.sleep(for: .seconds(1.5))
             }
         }
@@ -87,9 +93,17 @@ struct WelcomeSheet: View {
     private var permissionsSection: some View {
         Panel(title: "Permissions", caption: "optional") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Availeth asks for these up front. Each is optional and unlocks a different level of detail.")
+                Text("Availeth asks for all three now. Each is optional and unlocks a different level of detail. macOS shows one dialog at a time.")
                     .font(.caption).foregroundStyle(Theme.ink2)
                     .fixedSize(horizontal: false, vertical: true)
+
+                if let asking = requesting {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.small)
+                        Text("Asking macOS for \(asking)…").font(.caption.weight(.medium)).foregroundStyle(Theme.ink)
+                    }
+                    .padding(.vertical, 2)
+                }
 
                 VStack(spacing: 0) {
                     permissionRow(
@@ -103,7 +117,7 @@ struct WelcomeSheet: View {
                     Rectangle().fill(Theme.line).frame(height: 1)
                     permissionRow(
                         icon: "camera.viewfinder", title: "Screen Recording",
-                        detail: "Needed for screenshots and the local-AI storyline. macOS only applies this one after a relaunch — grant it, then click Relaunch.",
+                        detail: "Needed for screen capture. macOS applies this one only after a relaunch. Grant it, then click Relaunch.",
                         granted: screenGranted,
                         needsRelaunch: true
                     ) {
@@ -113,7 +127,7 @@ struct WelcomeSheet: View {
                     Rectangle().fill(Theme.line).frame(height: 1)
                     permissionRow(
                         icon: "keyboard", title: "Input Monitoring",
-                        detail: "Count keystrokes and clicks and detect shortcuts — never the characters you type. Grant, then relaunch.",
+                        detail: "Counts keystrokes and clicks, and spots shortcuts. Never the characters you type. Grant, then relaunch.",
                         granted: inputGranted
                     ) {
                         _ = Permissions.requestInputMonitoring()
@@ -220,9 +234,68 @@ struct WelcomeSheet: View {
         .padding(20)
     }
 
+    /// On the first ever launch, raise all three system prompts in turn rather
+    /// than waiting for the user to find three separate Grant buttons.
+    ///
+    /// Order matters. Screen Recording and Input Monitoring show a dialog with
+    /// Allow and Deny, answered without leaving Availeth. Accessibility's dialog
+    /// only offers "Open System Settings", so it takes the user out of the app
+    /// for as long as it takes them to find the switch. It therefore goes LAST:
+    /// anything fired after it lands on a screen the user is no longer looking
+    /// at, and macOS raises each prompt only once per app, so a missed prompt is
+    /// missed permanently. (Measured on a clean install with fixed 2 s gaps:
+    /// Accessibility was granted 8 s after firing, by which time the other two
+    /// had already fired into an empty screen and neither registered.)
+    ///
+    /// Each step waits for its answer rather than sleeping a fixed interval.
+    private func requestAllPermissionsOnce() async {
+        guard !UserDefaults.standard.bool(forKey: Self.promptedKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.promptedKey)
+        try? await Task.sleep(for: .seconds(1.2))   // let the sheet be read first
+
+        if !Permissions.screenRecordingGranted {
+            requesting = "Screen Recording"
+            Permissions.requestScreenRecording()
+            await waitForAnswer(seconds: 45) { Permissions.screenRecordingGranted }
+        }
+        if !Permissions.inputMonitoringGranted {
+            requesting = "Input Monitoring"
+            Permissions.requestInputMonitoring()
+            await waitForAnswer(seconds: 45) { Permissions.inputMonitoringGranted }
+        }
+        if !AXReader.isTrusted {
+            requesting = "Accessibility"
+            AXReader.requestTrust()
+            await waitForAnswer(seconds: 180) { AXReader.isTrusted }
+        }
+        requesting = nil
+    }
+
+    /// Polls twice a second until the permission is granted or the budget runs
+    /// out. A denial cannot be observed directly, so the timeout is what moves
+    /// the sequence on; it is generous because granting Accessibility means a
+    /// trip to System Settings.
+    private func waitForAnswer(seconds: Int, _ granted: @escaping () -> Bool) async {
+        for _ in 0..<(seconds * 2) {
+            if granted() || Task.isCancelled { return }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
+    }
+
     private func finish() {
-        UserDefaults.standard.set(true, forKey: Self.onboardedKey)
+        // Only count the user as onboarded once something was actually granted.
+        // Marking it done regardless meant one stray click on the very first
+        // launch permanently cost the app every capability, with no second ask
+        // and nothing on screen to say so.
+        let anyGranted = AXReader.isTrusted
+            || Permissions.screenRecordingGranted
+            || Permissions.inputMonitoringGranted
+        if anyGranted {
+            UserDefaults.standard.set(true, forKey: Self.onboardedKey)
+        }
         if !state.engine.isObserving { state.engine.start() }
+        // Leaving the intro means leaving the sample data behind.
+        state.showDemo = false
         dismiss()
     }
 
