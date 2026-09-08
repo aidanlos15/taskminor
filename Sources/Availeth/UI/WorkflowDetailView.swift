@@ -91,6 +91,7 @@ struct WorkflowDetailView: View {
                         .font(.system(size: 13, weight: .semibold)).numeric()
                         .foregroundStyle(Theme.accent).padding(.top, 2)
                 }
+                evidenceRow
             }
         }
         .padding(16)
@@ -226,7 +227,44 @@ struct WorkflowDetailView: View {
 
     // MARK: - Helpers
 
+    /// The countable facts behind the verdict, so a finding can be checked
+    /// rather than taken on trust. This is what a customer is being asked to
+    /// believe before they hand the work to Availeth.
     @ViewBuilder
+    private var evidenceRow: some View {
+        let v = pattern.verdict
+        HStack(alignment: .top, spacing: 24) {
+            evidenceItem("\(pattern.occurrences)", "runs seen")
+            evidenceItem("\(pattern.daysObserved)", pattern.daysObserved == 1 ? "day" : "separate days")
+            if pattern.transferCount > 0 { evidenceItem("\(pattern.transferCount)", "data movements") }
+            if !pattern.fields.isEmpty { evidenceItem("\(pattern.fields.count)", "fields each run") }
+            Spacer()
+        }
+        .padding(.top, 8)
+        if !pattern.fields.isEmpty {
+            Text("Fields: " + pattern.fields.prefix(6).joined(separator: ", "))
+                .font(.caption).foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let caveats = v?.caveats, !caveats.isEmpty {
+            Text("Worth knowing: " + caveats.joined(separator: ", and ") + ".")
+                .font(.caption).foregroundStyle(Theme.amber)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if v?.level == .insufficient {
+            Text("Availeth needs \(Verdict.minOccurrences) runs across \(Verdict.minDays) separate days before judging this, so a busy hour is never mistaken for a routine.")
+                .font(.caption).foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func evidenceItem(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(value).font(.system(size: 17, weight: .bold)).numeric().foregroundStyle(Theme.ink)
+            Text(label).font(.system(size: 10)).textCase(.uppercase).tracking(0.6).foregroundStyle(Theme.ink3)
+        }
+    }
+
     private func section<Content: View>(_ title: String, icon: String, tint: Color = Theme.ink, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: icon)
