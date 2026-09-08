@@ -11,7 +11,6 @@ struct LogsView: View {
     @State private var shots: [Screenshot] = []
     @State private var narratives: [SceneNarrative] = []
     @State private var idles: [IdleSession] = []
-    @State private var transfers: [Transfer] = []
     @State private var search = ""
 
     private static let displayCap = 300
@@ -29,10 +28,6 @@ struct LogsView: View {
         ScrollView {
             VStack(spacing: 16) {
                 schemaCard
-
-                if !transfers.isEmpty {
-                    transfersCard
-                }
 
                 if !narratives.isEmpty || !idles.isEmpty {
                     storylineCard
@@ -73,7 +68,6 @@ struct LogsView: View {
         let to = Date().addingTimeInterval(60)
         shots = state.store.screenshots(from: from, to: to, demo: state.showDemo)
         narratives = state.store.narratives(from: from, to: to, demo: state.showDemo)
-        transfers = state.store.transfers(from: from, to: to, demo: state.showDemo).reversed()
         idles = state.store.idleSessions(from: from, to: to, demo: state.showDemo)
     }
 
@@ -116,47 +110,6 @@ struct LogsView: View {
     private var timeline: [TimelineEntry] {
         let merged = narratives.map(TimelineEntry.moment) + idles.map(TimelineEntry.idle)
         return merged.sorted { $0.time > $1.time }
-    }
-
-    /// Every movement of data between two contexts. This is the evidence the
-    /// Workflows tab reasons from, so it belongs in the record the person can
-    /// read: the tab promises the complete raw data, and for a while this was
-    /// captured and shown nowhere.
-    private var transfersCard: some View {
-        let entries = Array(transfers.prefix(120))
-        return Card(title: "Data movements",
-                    subtitle: "\(transfers.count) time\(transfers.count == 1 ? "" : "s") something was copied in one place and pasted in another. Availeth records where it left and where it landed, never what was copied.") {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(entries.enumerated()), id: \.element.id) { index, t in
-                    transferRow(t)
-                    if index < entries.count - 1 { Rectangle().fill(Theme.line).frame(height: 1) }
-                }
-            }
-        }
-    }
-
-    private func transferRow(_ t: Transfer) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(t.at.formatted(date: .omitted, time: .standard))
-                .font(.system(size: 10.5, design: .monospaced)).numeric()
-                .foregroundStyle(Theme.ink3).frame(width: 74, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(t.fromUnit).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.ink)
-                    Image(systemName: "arrow.right").font(.system(size: 9)).foregroundStyle(Theme.accent)
-                    Text(t.toUnit).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.ink)
-                }
-                HStack(spacing: 8) {
-                    if !t.toField.isEmpty {
-                        Text("into \(t.toField)").font(.caption2).foregroundStyle(Theme.ink2)
-                    }
-                    Text("\(Int(t.gapSeconds))s between copy and paste")
-                        .font(.caption2).foregroundStyle(Theme.ink3)
-                }
-            }
-            Spacer()
-        }
-        .padding(.vertical, 7)
     }
 
     private var storylineCard: some View {

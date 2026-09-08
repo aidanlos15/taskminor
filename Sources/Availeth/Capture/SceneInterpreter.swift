@@ -19,6 +19,15 @@ protocol SceneInterpreter {
     /// Text-only synthesis (no image) — used to fuse a minute or a task's signals
     /// into a summary. Returns the scrubbed model output, or nil on failure.
     func summarize(prompt: String, maxTokens: Int) async -> String?
+    /// As above, with sequences that end generation early (a few-shot prompt
+    /// otherwise runs on into a fourth example).
+    func summarize(prompt: String, maxTokens: Int, stop: [String]) async -> String?
+}
+
+extension SceneInterpreter {
+    func summarize(prompt: String, maxTokens: Int, stop: [String]) async -> String? {
+        await summarize(prompt: prompt, maxTokens: maxTokens)
+    }
 }
 
 struct SceneContext {
@@ -189,26 +198,25 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
 
     /// Privacy-first: one content-free sentence (paired with the PII scrub).
     private static let activityPrompt = """
-        You are observing an employee's screen to map their work process. In ONE concise sentence, \
-        describe the task the person appears to be doing and the app/screen they are in. \
-        Focus on the ACTION and WORKFLOW STEP (e.g. "Entering a vendor bill in an accounting system", \
-        "Searching a spreadsheet for a purchase order"). \
-        Do NOT transcribe or repeat any specific personal data, names, numbers, amounts, or email \
-        addresses you see. Describe the activity, not the contents.
+        In ONE sentence starting with a verb, record what is being done on this screen and in which \
+        app and page, for example "Entering a vendor bill in NetSuite" or "Searching a spreadsheet for \
+        a purchase order". State only what is visible; do not guess the goal. Do not name or guess who \
+        is working: a personal name on screen belongs to a record, a customer or a colleague, never to \
+        the person at the keyboard. Do not transcribe personal data, names, numbers, amounts or email \
+        addresses.
         """
 
     /// Detailed: read what's actually on screen so the work can be understood
     /// well enough to judge — and later build — an automation.
     private static let detailedPrompt = """
-        You are documenting exactly what is happening on this screen so a colleague could understand \
-        the work and decide whether it can be automated. Be specific and concrete — describe what is \
-        actually visible, do not generalise. Cover, in a short paragraph:
-        • The exact app and the specific screen/page (e.g. "the New Vendor Bill form in NetSuite", "a Calendly booking page for a 30-min meeting").
-        • The specific action being taken right now (e.g. "typing an invoice number into the Reference field", "selecting a time slot").
-        • The concrete on-screen content that matters to the task: form field labels AND the values in them, buttons, the subject of an email or document, and — if an AI tool (ChatGPT/Claude) is open — the actual question or prompt being asked.
-        • Where data appears to be coming from and going to (e.g. "copying the total from the PDF to paste into the ERP").
-        • The apparent goal of this step.
-        Write 3–5 sentences of concrete detail. It is fine to quote short on-screen text.
+        Record exactly what is on this screen in three to five sentences, each starting with a verb, \
+        so a colleague could follow the step. Cover: the app and the specific page or form (for \
+        example "the New Vendor Bill form in NetSuite"); the action under way (for example "typing an \
+        invoice number into the Reference field"); the field labels and the values in them, buttons, \
+        the subject of an email or document, and the actual question typed if an AI tool is open; and \
+        where data is being taken from and put to, when that is visible. Quote short on-screen text. \
+        State only what is visible; do not add a purpose or a guess. Do not name or guess who is \
+        working: a personal name on screen belongs to a record, a customer or a colleague.
         """
 
     func narrate(pngData: Data, context: SceneContext) async -> String? {
@@ -242,12 +250,21 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
     }
 
     func summarize(prompt: String, maxTokens: Int) async -> String? {
+        await summarize(prompt: prompt, maxTokens: maxTokens, stop: [])
+    }
+
+    func summarize(prompt: String, maxTokens: Int, stop: [String]) async -> String? {
+        // num_ctx is set explicitly: Ollama's default window is 4096 tokens and
+        // a prompt that overflows it is cut from the FRONT, which silently
+        // drops the rules and examples and keeps only the tail of the record.
+        var options: [String: Any] = ["temperature": 0.2, "num_predict": maxTokens, "num_ctx": 8192]
+        if !stop.isEmpty { options["stop"] = stop }
         let body: [String: Any] = [
             "model": textModel,
             "prompt": prompt,
             "stream": false,
             "keep_alive": "10m",
-            "options": ["temperature": 0.2, "num_predict": maxTokens],
+            "options": options,
         ]
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
         var req = URLRequest(url: endpoint)

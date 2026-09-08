@@ -160,7 +160,7 @@ enum DemoData {
                 title: "Supplier invoice processing",
                 apps: "Mail, Preview, Microsoft Excel, Google Chrome",
                 automatable: "High — repeated copy/paste between systems, structured data entry into fields",
-                story: "The employee opened a supplier invoice from email, checked the PDF, looked up the purchase order in a spreadsheet, then re-entered the supplier, invoice number, and amount into NetSuite and submitted the bill for approval. The same copy-from-spreadsheet, paste-into-ERP pattern repeats every invoice — a strong candidate for automated extraction and posting.",
+                story: "Opened a supplier invoice from email and checked the PDF, then looked up its purchase order in the spreadsheet. Re-entered the supplier, invoice number and amount into a vendor bill in NetSuite and submitted it for approval.",
                 startHour: 9.1,
                 minutes: [
                     ("Opened a supplier invoice email and saved the attached PDF.", 12, 4, "⌘S×1", ""),
@@ -175,7 +175,7 @@ enum DemoData {
                 title: "CRM opportunity updates",
                 apps: "Google Chrome, Microsoft Excel",
                 automatable: "Medium — structured data entry into fields, form/tab navigation",
-                story: "The employee worked through the sales pipeline in Salesforce, cross-checking figures against a deal-tracking spreadsheet and updating each opportunity's stage and amount by hand. The lookups and field updates are consistent enough to be driven from the spreadsheet automatically.",
+                story: "Worked through the sales pipeline in Salesforce with the deal-tracking spreadsheet open alongside. Checked each opportunity's figures against the spreadsheet and typed the updated stage and amount into Salesforce by hand.",
                 startHour: 11.0,
                 minutes: [
                     ("Reviewed the Q3 pipeline in Salesforce and opened the deal-tracker spreadsheet.", 10, 5, "⌘F×1, ↵×1", "Account Search [search]"),
@@ -188,7 +188,7 @@ enum DemoData {
                 title: "Weekly report preparation",
                 apps: "Microsoft Excel, Keynote, Mail",
                 automatable: "Medium — heavy manual typing, repetitive data entry",
-                story: "The employee pulled weekly figures into a spreadsheet, rebuilt the same summary slides in Keynote, and emailed the report. The report structure is identical each week — a candidate for templated generation from the source data.",
+                story: "Compiled the weekly figures in the operations report spreadsheet, then rebuilt the summary slides in Keynote from them. Emailed the finished report from Mail.",
                 startHour: 14.5,
                 minutes: [
                     ("Compiled weekly figures in the operations report spreadsheet.", 210, 8, "⌘C×3, ⌘V×3", ""),

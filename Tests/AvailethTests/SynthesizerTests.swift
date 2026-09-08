@@ -69,7 +69,8 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertFalse(ctx!.isAway)
         XCTAssertEqual(ctx!.keystrokes, 20)
         XCTAssertTrue(ctx!.prompt.contains("Searching a spreadsheet"))
-        XCTAssertTrue(ctx!.prompt.contains("⌘C"))
+        XCTAssertTrue(ctx!.prompt.contains("Keys: copy"), ctx!.prompt)
+        XCTAssertFalse(ctx!.prompt.contains("⌘"), "symbols are translated before the model sees them")
     }
 
     func testIdleMinuteMarkedAway() {
@@ -118,7 +119,7 @@ final class SynthesizerTests: XCTestCase {
 
     func testParseFallsBackWhenUnformatted() {
         let (title, story) = Synthesizer.parseTitleAndStory("just a blob of text", fallbackApps: ["Excel"])
-        XCTAssertEqual(title, "Excel workflow")
+        XCTAssertEqual(title, "Excel")
         XCTAssertEqual(story, "just a blob of text")
     }
 
@@ -207,28 +208,31 @@ final class SynthesizerNoModelTests: XCTestCase {
         XCTAssertFalse(summaries.isEmpty, "no model must not mean no summaries")
     }
 
-    /// The no-model line carries the signals an automation judgement needs, not
-    /// just a list of app names.
+    /// The no-model line is built from the record: where the work was, how
+    /// much typing, what was typed into and what moved. Not a list of app names
+    /// and not a recital of counts.
     func testFallbackTextUsesEverySignal() {
-        let ctx = Synthesizer.MinuteContext(
-            minute: Date(), apps: ["Microsoft Excel", "Google Chrome"],
-            keystrokes: 340, clicks: 24, shortcuts: "Copy, Paste",
-            fields: "Amount, Invoice Number", sceneTexts: [], sourceCount: 2, isAway: false)
-        let text = ctx.fallbackText
-        XCTAssertTrue(text.contains("Microsoft Excel"), text)
-        XCTAssertTrue(text.contains("340 keystrokes"), text)
-        XCTAssertTrue(text.contains("24 clicks"), text)
-        XCTAssertTrue(text.contains("Copy, Paste"), text)
-        XCTAssertTrue(text.contains("Amount, Invoice Number"), text)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let spans = [
+            ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel", windowTitle: "PO.xlsx",
+                         start: start, end: start.addingTimeInterval(20), keystrokes: 40, clicks: 4, shortcuts: "⌘C×2", fields: ""),
+            ActivitySpan(bundleID: "com.google.Chrome", appName: "Google Chrome", windowTitle: "Vendor Bills",
+                         start: start.addingTimeInterval(20), end: start.addingTimeInterval(55), keystrokes: 300, clicks: 20,
+                         shortcuts: "⌘V×2", fields: "Amount [currency], Invoice Number [identifier]"),
+        ]
+        let ctx = Synthesizer.buildMinuteContext(minute: start, narratives: [], spans: spans, idleSeconds: 0, idleFractionForAway: 0.6)!
+        XCTAssertEqual(ctx.fallbackText,
+                       "Typed at length in Microsoft Excel (PO.xlsx) and Google Chrome (Vendor Bills), copying and pasting. Typed into Amount, Invoice Number in Google Chrome.")
     }
 
-    /// Singular units read correctly, so the line never says "1 keystrokes".
+    /// One window and a little typing reads as one plain sentence, never
+    /// "1 keystrokes".
     func testFallbackTextSingularUnits() {
-        let ctx = Synthesizer.MinuteContext(
-            minute: Date(), apps: ["Mail"], keystrokes: 1, clicks: 1,
-            shortcuts: "", fields: "", sceneTexts: [], sourceCount: 1, isAway: false)
-        XCTAssertTrue(ctx.fallbackText.contains("1 keystroke,"), ctx.fallbackText)
-        XCTAssertTrue(ctx.fallbackText.contains("1 click."), ctx.fallbackText)
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let spans = [ActivitySpan(bundleID: "com.apple.mail", appName: "Mail", windowTitle: "Inbox",
+                                  start: start, end: start.addingTimeInterval(30), keystrokes: 1, clicks: 1, shortcuts: "", fields: "")]
+        let ctx = Synthesizer.buildMinuteContext(minute: start, narratives: [], spans: spans, idleSeconds: 0, idleFractionForAway: 0.6)!
+        XCTAssertEqual(ctx.fallbackText, "Worked briefly in Mail (Inbox).")
     }
 
     /// A scene narrative, when one exists, still wins over the generic line.

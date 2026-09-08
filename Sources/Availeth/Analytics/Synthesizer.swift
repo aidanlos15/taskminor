@@ -9,7 +9,11 @@ import Foundation
 final class Synthesizer {
 
     struct Config {
-        var maxMinutesPerRun = 8
+        /// Minutes summarised per run. Most minutes are "thin" (windows and
+        /// typing only) and never reach the model, so a run of thirty costs a
+        /// few seconds; only minutes with fields, moved data or screen notes
+        /// wait on the model.
+        var maxMinutesPerRun = 30
         var taskGapSeconds: TimeInterval = 5 * 60
         /// Hard ceiling so one unbroken sitting is not a single enormous card.
         var maxTaskMinutes = 45
@@ -89,18 +93,26 @@ final class Synthesizer {
             let spans = store.spans(from: minute, to: next, demo: false)
             let idle = store.idleSeconds(from: minute, to: next, demo: false)
 
-            if let ctx = Self.buildMinuteContext(minute: minute, narratives: narratives, spans: spans, idleSeconds: idle, idleFractionForAway: config.idleFractionForAway) {
+            let transfers = store.transfers(from: minute, to: next, demo: false)
+            if let ctx = Self.buildMinuteContext(minute: minute, narratives: narratives, spans: spans, transfers: transfers, idleSeconds: idle, idleFractionForAway: config.idleFractionForAway) {
                 if ctx.isAway {
                     // Settled immediately (task_id = -1) so it never groups into a
                     // task and never re-fetches as ungrouped.
                     store.insertMinuteSummary(ctx.summary(text: "Away from keyboard", taskID: -1))
-                } else if modelReady, let text = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 180) {
-                    store.insertMinuteSummary(ctx.summary(text: text))
+                } else if ctx.record.isThin || !modelReady {
+                    // Windows and typing only: a line built from the record says
+                    // all there is to say, and a model asked for more invents it.
+                    // The same line stands in when there is no model, so the
+                    // minute isn't lost or endlessly retried (the UNIQUE index
+                    // prevents dupes).
+                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(ctx.fallbackText)))
                 } else {
-                    // No model, or the model failed. A line built from the signals
-                    // so the minute isn't lost or endlessly retried (the UNIQUE
-                    // index prevents dupes).
-                    store.insertMinuteSummary(ctx.summary(text: ctx.fallbackText))
+                    // The model's entry is kept only when every name and number
+                    // in it comes from the record; otherwise the record's own line.
+                    let raw = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 140, stop: StoryWriter.minuteStops)
+                    // Both paths are scrubbed the same way, so an address in a
+                    // window title reads as [email] whichever line was kept.
+                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(StoryWriter.acceptEntry(raw, record: ctx.record) ?? ctx.fallbackText)))
                 }
             } else {
                 // No activity this minute — record a settled placeholder so the
@@ -140,10 +152,16 @@ final class Synthesizer {
     private func makeTask(from group: [MinuteSummary], modelReady: Bool) async -> TaskSummary? {
         guard let first = group.first, let last = group.last else { return nil }
         let apps = Self.mergedApps(group)
+        let windowStart = first.minuteStart, windowEnd = last.minuteStart.addingTimeInterval(60)
+        let transferList = store.transfers(from: windowStart, to: windowEnd, demo: false)
+            .filter { $0.fromUnit != $0.toUnit }
+        let record = StoryWriter.taskRecord(minutes: group, transfers: transferList)
         let raw = modelReady
-            ? await interpreter.summarize(prompt: Self.taskPrompt(group: group, apps: apps), maxTokens: 400)
+            ? await interpreter.summarize(prompt: StoryWriter.taskPrompt(record), maxTokens: 320, stop: StoryWriter.taskStops)
             : nil
-        let (title, story) = Self.parseTitleAndStory(raw, fallbackApps: apps, fallbackStory: Self.signalStory(group: group, apps: apps))
+        var (title, story) = StoryWriter.acceptTitleAndStory(raw, record: record)
+        story = NarrativeSanitizer.scrub(story)
+        if !modelReady { story += " Install the local text model for a written account." }
         // How often has this shape of work been seen? A card is judged on the
         // history of its own app set, not on the busyness of one sitting.
         let signature = Set(apps.map { $0.lowercased() })
@@ -157,9 +175,7 @@ final class Synthesizer {
             }
         let occurrences = history.count + 1
         let days = TransferMiner.distinctDays(history.map(\.start) + [first.minuteStart])
-        let windowStart = first.minuteStart, windowEnd = last.minuteStart.addingTimeInterval(60)
-        let transfers = store.transfers(from: windowStart, to: windowEnd, demo: false)
-            .filter { $0.fromUnit != $0.toUnit }.count
+        let transfers = transferList.count
         let durations = history.map(\.duration) + [windowEnd.timeIntervalSince(windowStart)]
         let automatable = Self.automatableAssessment(group, occurrences: occurrences, daysObserved: days,
                                                      transfers: transfers, durations: durations)
@@ -194,46 +210,15 @@ final class Synthesizer {
         var sceneTexts: [String]
         var sourceCount: Int
         var isAway: Bool
+        /// The labelled record the model is shown and checked against.
+        var record: StoryWriter.MinuteRecord = .init()
 
-        var prompt: String {
-            var lines = [
-                "You are documenting ONE minute of work so a colleague could understand it and judge what could be automated.",
-                "Write 2–3 concrete sentences describing exactly what was done this minute. PRESERVE the specific details from the observations below — the exact screens/pages, form fields and their values, and any questions asked of AI tools. Do not generalise or drop specifics.",
-                // Window titles routinely contain the names of customers, staff
-                // and records. A model told it is describing "an employee" picks
-                // the nearest name and writes the account as though that person
-                // were the one being watched. It is not: it is a name inside
-                // their work.
-                "Never name the person doing the work and never guess who they are. Always call them \"the user\". Any personal name you see is data on their screen — a customer, a colleague, a record — not the person working.",
-                "",
-                "Apps/tabs: \(apps.joined(separator: ", "))",
-            ]
-            if !sceneTexts.isEmpty { lines.append("Screen observations: \(sceneTexts.prefix(8).joined(separator: "; "))") }
-            if !shortcuts.isEmpty { lines.append("Shortcuts/keys: \(shortcuts)") }
-            if !fields.isEmpty { lines.append("Fields entered: \(fields)") }
-            lines.append("Typing: \(keystrokes) keystrokes, \(clicks) clicks.")
-            lines.append("\nDetailed account of this minute:")
-            return lines.joined(separator: "\n")
-        }
+        var prompt: String { StoryWriter.minutePrompt(record) }
 
-        /// What the minute reads as with no model available. Every captured
-        /// signal is used, because "Worked in Excel, Chrome." is not worth
-        /// storing and tells the user nothing about what could be automated.
-        var fallbackText: String {
-            if !sceneTexts.isEmpty { return sceneTexts[0] }
-            var parts: [String] = []
-            let appPart = apps.prefix(3).joined(separator: ", ")
-            parts.append(appPart.isEmpty ? "Worked on this Mac." : "Worked in \(appPart).")
-            if keystrokes > 0 || clicks > 0 {
-                var counts: [String] = []
-                if keystrokes > 0 { counts.append("\(keystrokes) keystroke\(keystrokes == 1 ? "" : "s")") }
-                if clicks > 0 { counts.append("\(clicks) click\(clicks == 1 ? "" : "s")") }
-                parts.append(counts.joined(separator: ", ") + ".")
-            }
-            if !shortcuts.isEmpty { parts.append("Shortcuts: \(shortcuts).") }
-            if !fields.isEmpty { parts.append("Typed into \(fields).") }
-            return parts.joined(separator: " ")
-        }
+        /// What the minute reads as with no model, or when the model's entry
+        /// failed its checks: a screen note if there is one, else one true
+        /// sentence built from the record.
+        var fallbackText: String { sceneTexts.first ?? StoryWriter.plainEntry(record) }
 
         func summary(text: String, taskID: Int64 = 0) -> MinuteSummary {
             MinuteSummary(
@@ -248,7 +233,7 @@ final class Synthesizer {
 
     /// Fuses a minute's raw rows into a context object, or nil if the minute had
     /// no meaningful activity.
-    static func buildMinuteContext(minute: Date, narratives: [SceneNarrative], spans: [ActivitySpan], idleSeconds: TimeInterval, idleFractionForAway: Double) -> MinuteContext? {
+    static func buildMinuteContext(minute: Date, narratives: [SceneNarrative], spans: [ActivitySpan], transfers: [Transfer] = [], idleSeconds: TimeInterval, idleFractionForAway: Double) -> MinuteContext? {
         let awayDominant = idleSeconds >= 60 * idleFractionForAway
         let hasActivity = !spans.isEmpty || !narratives.isEmpty
         if !hasActivity && awayDominant {
@@ -279,7 +264,8 @@ final class Synthesizer {
         if awayDominant && keystrokes == 0 && clicks == 0 && sceneTexts.isEmpty {
             return MinuteContext(minute: minute, apps: apps, keystrokes: 0, clicks: 0, shortcuts: "", fields: "", sceneTexts: [], sourceCount: 0, isAway: true)
         }
-        return MinuteContext(minute: minute, apps: apps, keystrokes: keystrokes, clicks: clicks, shortcuts: shortcuts, fields: fields, sceneTexts: sceneTexts, sourceCount: narratives.count, isAway: false)
+        return MinuteContext(minute: minute, apps: apps, keystrokes: keystrokes, clicks: clicks, shortcuts: shortcuts, fields: fields, sceneTexts: sceneTexts, sourceCount: narratives.count, isAway: false,
+                             record: StoryWriter.minuteRecord(spans: spans, transfers: transfers, narratives: narratives))
     }
 
     // MARK: - Pure task grouping
@@ -499,25 +485,8 @@ final class Synthesizer {
         return out.prefix(8).joined(separator: ", ")
     }
 
-    static func taskPrompt(group: [MinuteSummary], apps: [String]) -> String {
-        let steps = group.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
-        return """
-        These are consecutive minutes of one task. Write a detailed account (4–6 sentences) of what was actually done, step by step, and the systems and data involved, so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
-
-        Never name the person doing the work and never guess who they are. Always call them "the user". Any personal name in the minutes is data on their screen — a customer, a colleague, a record — not the person working. The title must not contain a personal name.
-
-        Apps involved: \(apps.joined(separator: ", "))
-        Minute-by-minute:
-        \(steps)
-
-        Reply EXACTLY in this format:
-        TITLE: <short title>
-        STORY: <4-6 detailed sentences preserving the specifics>
-        """
-    }
-
     static func parseTitleAndStory(_ raw: String?, fallbackApps: [String], fallbackStory: String? = nil) -> (title: String, story: String) {
-        let fallbackTitle = (fallbackApps.first ?? "Work") + " workflow"
+        let fallbackTitle = StoryWriter.plainTitle(apps: fallbackApps)
         let fbStory = fallbackStory ?? "Worked across \(fallbackApps.joined(separator: ", "))."
         guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (fallbackTitle, fbStory)

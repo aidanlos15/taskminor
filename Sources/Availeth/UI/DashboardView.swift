@@ -5,6 +5,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
     case story = "Story"
     case tasks = "Tasks"
     case workflows = "Workflows"
+    case transfers = "Data transfers"
     case logs = "Logs"
     case privacy = "Privacy"
 
@@ -17,6 +18,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
         case .story: return "text.alignleft"
         case .tasks: return "checklist"
         case .workflows: return "arrow.triangle.branch"
+        case .transfers: return "arrow.left.arrow.right"
         case .logs: return "line.3.horizontal"
         case .privacy: return "lock.shield"
         }
@@ -247,6 +249,7 @@ struct DashboardView: View {
         case .story: StoryView(range: range)
         case .tasks: TasksView(range: range)
         case .workflows: WorkflowsView(range: range)
+        case .transfers: TransfersView(range: range)
         case .logs: LogsView(range: range)
         case .privacy: PrivacyView()
         }
