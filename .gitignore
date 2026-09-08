@@ -18,3 +18,8 @@ Package.resolved
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Release artifacts
+build/
+# The bundled model service is fetched at package time, never committed
+vendor/ollama

@@ -31,6 +31,45 @@ cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# The local model service, bundled so a customer installs nothing. MIT licensed
+# (~31 MB thinned to this Mac's architecture). Set BUNDLE_OLLAMA=0 to ship
+# without it and fall back to asking the customer to install Ollama themselves.
+if [ "${BUNDLE_OLLAMA:-1}" = "1" ]; then
+  SRC=""
+  for candidate in "$ROOT/vendor/ollama" "/Applications/Ollama.app/Contents/Resources/ollama"; do
+    [ -x "$candidate" ] && { SRC="$candidate"; break; }
+  done
+  if [ -n "$SRC" ]; then
+    ARCH="$(uname -m)"
+    echo "==> Bundling the model service ($ARCH)"
+    if lipo -info "$SRC" 2>/dev/null | grep -q "Architectures in the fat file"; then
+      lipo -thin "$ARCH" "$SRC" -output "$APP/Contents/Resources/ollama"
+    else
+      cp "$SRC" "$APP/Contents/Resources/ollama"
+    fi
+    chmod +x "$APP/Contents/Resources/ollama"
+    # Intel Macs load their CPU backends from separate libraries; arm64 has them
+    # compiled in, so this copies nothing on Apple Silicon.
+    if [ "$ARCH" = "x86_64" ]; then
+      cp "$(dirname "$SRC")"/libggml*.dylib "$(dirname "$SRC")"/libggml*.so "$APP/Contents/Resources/" 2>/dev/null || true
+    fi
+    # MIT requires the licence text to travel with the binary, along with the
+    # notices for what it links. Both live in vendor/ and are checked in.
+    mkdir -p "$APP/Contents/Resources/Licenses"
+    [ -f "$ROOT/vendor/OLLAMA_LICENSE" ] && cp "$ROOT/vendor/OLLAMA_LICENSE" "$APP/Contents/Resources/Licenses/"
+    [ -d "$ROOT/vendor/notices" ] && cp "$ROOT/vendor"/notices/* "$APP/Contents/Resources/Licenses/" 2>/dev/null || true
+    if [ ! -f "$APP/Contents/Resources/Licenses/OLLAMA_LICENSE" ]; then
+      echo "error: bundling the service requires vendor/OLLAMA_LICENSE. Fetch it from" >&2
+      echo "       https://raw.githubusercontent.com/ollama/ollama/main/LICENSE" >&2
+      exit 1
+    fi
+    echo "    service: $(du -h "$APP/Contents/Resources/ollama" | cut -f1)"
+  else
+    echo "warn: no ollama binary found — shipping without the bundled service."
+    echo "      Put one at vendor/ollama, or install Ollama.app, or set BUNDLE_OLLAMA=0."
+  fi
+fi
+
 # Remove the symbol table. Swift compiles to machine code, so the source is
 # never readable, but an unstripped binary lists every type and function name.
 echo "==> Stripping symbols"
@@ -52,6 +91,11 @@ fi
 [ -n "$IDENTITY" ] || { echo "error: no code-signing identity at all. Run scripts/make_signing_identity.sh." >&2; exit 1; }
 
 echo "==> Signing"
+# Nested executables are signed first, then the app seals over them.
+if [ -f "$APP/Contents/Resources/ollama" ]; then
+  # shellcheck disable=SC2086
+  codesign --force $HARDENED --sign "$IDENTITY" "$APP/Contents/Resources/ollama"
+fi
 # shellcheck disable=SC2086
 codesign --force $HARDENED --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP" && echo "    signature verifies"

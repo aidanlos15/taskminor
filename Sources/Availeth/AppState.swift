@@ -132,8 +132,12 @@ final class AppState: ObservableObject {
         if onboarded && engine.shouldObserveOnLaunch {
             engine.start()
         }
-        // Always check, not only in storyline mode: the story layer needs the
-        // text model regardless, and the Privacy tab has to show its real state.
+        // Start (or find) the local model service before asking what it has.
+        // With the server bundled there is nothing for the customer to install.
+        Task { @MainActor in
+            await OllamaService.shared.ensureRunning()
+            self.engine.refreshInterpreterStatus()
+        }
         engine.refreshInterpreterStatus()
         dataVersion += 1
         refreshTodayTopApps()

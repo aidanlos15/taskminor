@@ -24,12 +24,12 @@ final class ModelInstaller: ObservableObject {
     private let host: String
     private var task: Task<Void, Never>?
 
-    init(host: String = "http://127.0.0.1:11434") { self.host = host }
+    init(host: String = OllamaService.resolvedHost) { self.host = host }
 
     var isBusy: Bool { if case .pulling = state { return true }; return false }
 
     /// Whether the Ollama daemon is answering at all.
-    static func daemonRunning(host: String = "http://127.0.0.1:11434") async -> Bool {
+    static func daemonRunning(host: String = OllamaService.resolvedHost) async -> Bool {
         guard let url = URL(string: "\(host)/api/tags") else { return false }
         var req = URLRequest(url: url); req.timeoutInterval = 3
         guard let (_, resp) = try? await URLSession.shared.data(for: req),

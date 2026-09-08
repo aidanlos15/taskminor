@@ -71,7 +71,9 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
-    init(visionModel: String = "qwen2.5vl:7b", textModel: String = "qwen2.5:3b", host: String = "http://127.0.0.1:11434") {
+    /// `host` defaults to whatever OllamaService resolved: the customer's own
+    /// service when they run one, otherwise Availeth's bundled copy.
+    init(visionModel: String = "qwen2.5vl:7b", textModel: String = "qwen2.5:3b", host: String = OllamaService.resolvedHost) {
         self.visionModel = visionModel
         self.textModel = textModel
         self.host = host
