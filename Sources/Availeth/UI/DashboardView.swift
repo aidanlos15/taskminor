@@ -61,7 +61,7 @@ struct DashboardView: View {
             HStack(spacing: 11) {
                 LogoMark(size: 34)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Availeth").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
+                    Wordmark(size: 14)
                     Text("Process Discovery").microLabel().font(.system(size: 9))
                 }
             }

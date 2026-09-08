@@ -35,9 +35,7 @@ struct MenuBarView: View {
         HStack(spacing: 10) {
             LogoMark(size: 30)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Availeth")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Theme.ink)
+                Wordmark(size: 14)
                 statusLine
             }
             Spacer()

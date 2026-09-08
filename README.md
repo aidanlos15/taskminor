@@ -75,6 +75,12 @@ strips its symbol table, so it carries no developer paths and no type or functio
 names. Swift compiles to machine code, so the source itself is never in the
 bundle.
 
+The app icon is generated, not drawn by hand: `Resources/AppIcon.svg` is the
+availeth.io mark on a macOS tile, and `scripts/make_icon.sh` renders it to
+`Resources/AppIcon.icns` at every size (needs `brew install librsvg`). The
+in-app mark loads that same icns, so the sidebar, the menu bar popover and the
+Dock never drift apart.
+
 Until it is signed with a Developer ID and notarized, macOS warns on first open
 and `spctl --assess` reports "rejected". Create the notary profile once:
 
