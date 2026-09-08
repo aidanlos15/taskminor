@@ -96,6 +96,43 @@ enum AXReader {
     /// File path of the document open in the focused window, or nil.
     /// This is the document's IDENTITY (its path) — never its contents — read
     /// from the standard AX document attribute. No Full Disk Access involved.
+    /// The URL of the page in the focused browser window, from the web area's
+    /// AXURL attribute. Bounded breadth-first search with the same short
+    /// messaging timeout as the title read, so a hung browser never stalls a tick.
+    static func focusedBrowserURL(pid: pid_t) -> URL? {
+        guard isTrusted else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
+        var windowRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+              let windowRef, CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
+        let window = unsafeDowncast(windowRef as AnyObject, to: AXUIElement.self)
+
+        var queue: [AXUIElement] = [window]
+        var visited = 0
+        while !queue.isEmpty && visited < 250 {
+            let el = queue.removeFirst()
+            visited += 1
+            AXUIElementSetMessagingTimeout(el, 0.25)
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String, role == "AXWebArea" {
+                var urlRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(el, kAXURLAttribute as CFString, &urlRef) == .success,
+                   let urlRef, CFGetTypeID(urlRef) == CFURLGetTypeID() {
+                    return (urlRef as! CFURL) as URL
+                }
+                if let str = urlRef as? String, let url = URL(string: str) { return url }
+            }
+            var kidsRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &kidsRef) == .success,
+               let kids = kidsRef as? [AXUIElement] {
+                queue.append(contentsOf: kids.prefix(40))
+            }
+        }
+        return nil
+    }
+
     static func focusedDocumentPath(pid: pid_t) -> String? {
         guard isTrusted else { return nil }
         let appElement = AXUIElementCreateApplication(pid)

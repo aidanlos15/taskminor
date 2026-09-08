@@ -11,7 +11,12 @@ final class Synthesizer {
     struct Config {
         var maxMinutesPerRun = 8
         var taskGapSeconds: TimeInterval = 5 * 60
-        var maxTaskMinutes = 10
+        /// Hard ceiling so one unbroken sitting is not a single enormous card.
+        var maxTaskMinutes = 45
+        /// A task must run this long before a context change can end it.
+        var minTaskMinutes = 3
+        /// Split when the apps in use turn over completely and stay turned over.
+        var splitOnContextChange = true
         /// Don't close a task whose last minute is newer than this (it may grow).
         var taskGraceSeconds: TimeInterval = 120
         /// A minute counts as "away" if idle covered at least this fraction of it.
@@ -139,7 +144,25 @@ final class Synthesizer {
             ? await interpreter.summarize(prompt: Self.taskPrompt(group: group, apps: apps), maxTokens: 400)
             : nil
         let (title, story) = Self.parseTitleAndStory(raw, fallbackApps: apps, fallbackStory: Self.signalStory(group: group, apps: apps))
-        let automatable = Self.automatableAssessment(group)
+        // How often has this shape of work been seen? A card is judged on the
+        // history of its own app set, not on the busyness of one sitting.
+        let signature = Set(apps.map { $0.lowercased() })
+        let history = store.taskSummaries(from: first.minuteStart.addingTimeInterval(-45 * 86400),
+                                          to: last.minuteStart, demo: false)
+            .filter { t in
+                let other = Set(t.apps.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
+                guard !other.isEmpty, !signature.isEmpty else { return false }
+                let overlap = Double(signature.intersection(other).count)
+                return overlap / Double(max(signature.count, other.count)) >= 0.6
+            }
+        let occurrences = history.count + 1
+        let days = TransferMiner.distinctDays(history.map(\.start) + [first.minuteStart])
+        let windowStart = first.minuteStart, windowEnd = last.minuteStart.addingTimeInterval(60)
+        let transfers = store.transfers(from: windowStart, to: windowEnd, demo: false)
+            .filter { $0.fromUnit != $0.toUnit }.count
+        let durations = history.map(\.duration) + [windowEnd.timeIntervalSince(windowStart)]
+        let automatable = Self.automatableAssessment(group, occurrences: occurrences, daysObserved: days,
+                                                     transfers: transfers, durations: durations)
         return TaskSummary(
             start: first.minuteStart,
             end: last.minuteStart.addingTimeInterval(60),
@@ -258,20 +281,45 @@ final class Synthesizer {
     /// Groups consecutive same-task minutes. Returns closed groups (ready to
     /// summarize) and the trailing pending run (too recent to close yet).
     static func groupMinutes(_ minutes: [MinuteSummary], now: Date, config: Config) -> (closed: [[MinuteSummary]], pending: [MinuteSummary]) {
-        // Boundary is temporal, NOT app-based: a real workflow deliberately moves
-        // through different apps (Mail → Excel → ERP), so splitting on app change
-        // would shred exactly the cross-app tasks we most want to see. A task runs
-        // until an idle/away gap or the length cap.
+        // A task ends at an idle gap, or when the set of apps in use turns over
+        // and STAYS turned over for two minutes — not on a fixed clock. Splitting
+        // every ten minutes produced "Code workflow" cards that were really time
+        // buckets: the same afternoon chopped into equal slices and each one named
+        // after whichever app happened to dominate it. Splitting on a single
+        // minute's app change would shred genuine cross-app workflows, so the
+        // change has to persist before it counts as a new task.
         let sorted = minutes.sorted { $0.minuteStart < $1.minuteStart }
         var groups: [[MinuteSummary]] = []
         var current: [MinuteSummary] = []
 
-        for m in sorted {
+        func appSet(_ m: MinuteSummary) -> Set<String> {
+            Set(m.apps.split(separator: ",").compactMap {
+                let app = $0.trimmingCharacters(in: .whitespaces).components(separatedBy: " — ").first ?? ""
+                return app.isEmpty ? nil : app
+            })
+        }
+
+        for (i, m) in sorted.enumerated() {
             if current.isEmpty { current = [m]; continue }
             let prev = current.last!
             let gap = m.minuteStart.timeIntervalSince(prev.minuteStart.addingTimeInterval(60))
             let tooLong = current.count >= config.maxTaskMinutes
-            if gap > config.taskGapSeconds || tooLong {
+
+            // Turnover: nothing this minute overlaps what the task has been doing.
+            var turnedOver = false
+            if !config.splitOnContextChange {
+                turnedOver = false
+            } else if current.count >= config.minTaskMinutes {
+                let running = current.suffix(3).reduce(into: Set<String>()) { $0.formUnion(appSet($1)) }
+                let now = appSet(m)
+                if !now.isEmpty && !running.isEmpty && now.isDisjoint(with: running) {
+                    // Only a change that holds for the next minute too.
+                    let next = i + 1 < sorted.count ? appSet(sorted[i + 1]) : now
+                    turnedOver = next.isEmpty || !next.isDisjoint(with: now)
+                }
+            }
+
+            if gap > config.taskGapSeconds || tooLong || turnedOver {
                 groups.append(current)
                 current = [m]
             } else {
@@ -359,7 +407,37 @@ final class Synthesizer {
 
     /// Reads the fused signals for automation potential. Copy/paste chains across
     /// apps and heavy repeated field entry score high; browsing/reading scores low.
-    static func automatableAssessment(_ minutes: [MinuteSummary]) -> String {
+    /// The Story card's automation line, from the same Verdict as the Workflows
+    /// tab. `daysObserved` and `occurrences` describe how often this shape of work
+    /// has been seen, so a single sitting can never read as "High".
+    static func automatableAssessment(_ minutes: [MinuteSummary], occurrences: Int, daysObserved: Int,
+                                      transfers: Int, durations: [TimeInterval]) -> String {
+        let shortcutsBlob = minutes.map(\.shortcuts).joined(separator: ", ")
+        var fieldRuns: [String: Int] = [:]
+        for m in minutes {
+            for raw in m.fields.split(separator: ",") {
+                if let f = Evidence.cleanField(String(raw)) { fieldRuns[f, default: 0] += 1 }
+            }
+        }
+        let keys = minutes.reduce(0) { $0 + $1.keystrokes }
+        let clicks = minutes.reduce(0) { $0 + $1.clicks }
+        let seconds = Double(minutes.count) * 60
+        let evidence = Evidence(
+            occurrences: occurrences,
+            daysObserved: daysObserved,
+            durations: durations,
+            transfers: transfers > 0 ? transfers : countOccurrences(of: ["⌘V"], in: shortcutsBlob),
+            consistentFields: fieldRuns.keys.sorted(),
+            keystrokes: keys, clicks: clicks,
+            switches: max(0, mergedApps(minutes).count - 1),
+            readingSeconds: Double(minutes.filter { $0.keystrokes == 0 && $0.clicks == 0 && $0.shortcuts.isEmpty }.count) * 60,
+            totalSeconds: seconds
+        )
+        return Verdict.assess(evidence).display
+    }
+
+    /// Kept for the old single-slice call shape used by tests of the raw scoring.
+    static func legacyAutomatableAssessment(_ minutes: [MinuteSummary]) -> String {
         let shortcutsBlob = minutes.map(\.shortcuts).joined(separator: ", ")
         let copyPaste = countOccurrences(of: ["⌘C", "⌘V"], in: shortcutsBlob)
         let tabs = countOccurrences(of: ["Tab"], in: shortcutsBlob)

@@ -13,6 +13,27 @@ enum WorkflowUnit {
     ]
 
     /// The unit label for a span.
+    static let browserBundles: Set<String> = [
+        "com.apple.Safari", "com.google.Chrome", "com.microsoft.edgemac", "company.thebrowser.Browser",
+        "org.mozilla.firefox", "com.brave.Browser", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
+    ]
+    static func isBrowser(bundleID: String) -> Bool { browserBundles.contains(bundleID) }
+
+    /// A page identity without the identifiers: "jobber.com/invoices/*". Query
+    /// strings and fragments are dropped, numeric and long hex path segments
+    /// become "*", and only the first two segments are kept, so every invoice
+    /// page is the same page and every schedule page is another.
+    static func pagePattern(_ url: URL) -> String {
+        guard var host = url.host?.lowercased() else { return "" }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        let segs = url.pathComponents.filter { $0 != "/" }.prefix(2).map { seg -> String in
+            if seg.allSatisfy(\.isNumber) { return "*" }
+            if seg.count >= 16, seg.allSatisfy({ $0.isHexDigit || $0 == "-" }) { return "*" }
+            return seg.lowercased()
+        }
+        return segs.isEmpty ? host : host + "/" + segs.joined(separator: "/")
+    }
+
     static func label(app: String, title: String) -> String {
         if browsers.contains(app) {
             return service(fromBrowserTitle: title) ?? shortApp(app)

@@ -82,18 +82,29 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertNil(Synthesizer.buildMinuteContext(minute: base, narratives: [], spans: [], idleSeconds: 0, idleFractionForAway: 0.6))
     }
 
-    // MARK: - Automatable heuristic
+    // MARK: - Automatable verdict (shared with the Workflows tab)
 
-    func testCopyPasteAcrossAppsScoresHigh() {
+    /// Copy-and-paste across apps is only a candidate once it has RECURRED.
+    /// The same minute judged on its own says so instead of guessing.
+    func testCopyPasteAcrossAppsNeedsRecurrenceBeforeScoringHigh() {
         let mins = [
-            minute(0, apps: "Excel, Chrome", keys: 40, shortcuts: "⌘C×3, ⌘V×3, Tab×5", fields: "A [identifier], B [currency], C [identifier]"),
+            minute(0, apps: "Excel, Chrome", keys: 40, shortcuts: "⌘C×3, ⌘V×3, Tab×5", fields: "Invoice Number [identifier], Amount [currency], PO Number [identifier]"),
         ]
-        XCTAssertTrue(Synthesizer.automatableAssessment(mins).hasPrefix("High"))
+        let onceOnly = Synthesizer.automatableAssessment(mins, occurrences: 1, daysObserved: 1, transfers: 3, durations: [180])
+        XCTAssertTrue(onceOnly.hasPrefix("Not enough evidence yet"), onceOnly)
+
+        let recurring = Synthesizer.automatableAssessment(mins, occurrences: 9, daysObserved: 5, transfers: 27,
+                                                          durations: Array(repeating: 180, count: 9))
+        XCTAssertTrue(recurring.hasPrefix("High"), recurring)
     }
 
-    func testBrowsingScoresLow() {
+    /// Browsing with nothing moved and no fields filled stays Low even when it
+    /// has recurred plenty.
+    func testBrowsingScoresLowEvenWhenItRecurs() {
         let mins = [minute(0, apps: "Chrome", keys: 5, shortcuts: "↓×3", fields: "")]
-        XCTAssertTrue(Synthesizer.automatableAssessment(mins).hasPrefix("Low"))
+        let v = Synthesizer.automatableAssessment(mins, occurrences: 12, daysObserved: 6, transfers: 0,
+                                                  durations: Array(repeating: 200, count: 12))
+        XCTAssertTrue(v.hasPrefix("Low"), v)
     }
 
     // MARK: - Parsing

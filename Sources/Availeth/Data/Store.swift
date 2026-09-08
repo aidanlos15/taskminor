@@ -58,6 +58,26 @@ final class Store {
         addColumnIfMissing(table: "spans", column: "shortcuts", decl: "TEXT NOT NULL DEFAULT ''")
         addColumnIfMissing(table: "spans", column: "fields", decl: "TEXT NOT NULL DEFAULT ''")
 
+        // Cross-context copy-and-paste movements. Structure only, never content.
+        exec("""
+            CREATE TABLE IF NOT EXISTS transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at REAL NOT NULL,
+                from_bundle TEXT NOT NULL,
+                from_app TEXT NOT NULL,
+                from_unit TEXT NOT NULL,
+                from_title TEXT NOT NULL DEFAULT '',
+                to_bundle TEXT NOT NULL,
+                to_app TEXT NOT NULL,
+                to_unit TEXT NOT NULL,
+                to_title TEXT NOT NULL DEFAULT '',
+                to_field TEXT NOT NULL DEFAULT '',
+                gap REAL NOT NULL DEFAULT 0,
+                is_demo INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        exec("CREATE INDEX IF NOT EXISTS idx_transfers_at ON transfers(at);")
+
         exec("""
             CREATE TABLE IF NOT EXISTS screenshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,6 +229,7 @@ final class Store {
     func deleteAll(demoOnly: Bool = false) {
         queue.sync {
             exec(demoOnly ? "DELETE FROM spans WHERE is_demo = 1;" : "DELETE FROM spans;")
+            exec(demoOnly ? "DELETE FROM transfers WHERE is_demo = 1;" : "DELETE FROM transfers;")
             purgeDeletedBytes()
         }
     }
@@ -216,7 +237,68 @@ final class Store {
     func deleteLiveData() {
         queue.sync {
             exec("DELETE FROM spans WHERE is_demo = 0;")
+            exec("DELETE FROM transfers WHERE is_demo = 0;")
             purgeDeletedBytes()
+        }
+    }
+
+    // MARK: - Transfers
+
+    @discardableResult
+    func insert(transfer t: Transfer) -> Int64 {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = "INSERT INTO transfers (at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, t.at.timeIntervalSince1970)
+            sqlite3_bind_text(stmt, 2, t.fromBundleID, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, t.fromApp, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, t.fromUnit, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, t.fromTitle, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 6, t.toBundleID, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 7, t.toApp, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 8, t.toUnit, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 9, t.toTitle, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 10, t.toField, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_double(stmt, 11, t.gapSeconds)
+            sqlite3_bind_int(stmt, 12, t.isDemo ? 1 : 0)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { return 0 }
+            return sqlite3_last_insert_rowid(db)
+        }
+    }
+
+    func transfers(from: Date, to: Date, demo: Bool) -> [Transfer] {
+        queue.sync {
+            var out: [Transfer] = []
+            var stmt: OpaquePointer?
+            let sql = "SELECT id, at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap FROM transfers WHERE at >= ? AND at < ? AND is_demo = ? ORDER BY at ASC;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, to.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
+            func str(_ i: Int32) -> String { sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? "" }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(Transfer(
+                    id: sqlite3_column_int64(stmt, 0),
+                    at: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+                    fromBundleID: str(2), fromApp: str(3), fromUnit: str(4), fromTitle: str(5),
+                    toBundleID: str(6), toApp: str(7), toUnit: str(8), toTitle: str(9), toField: str(10),
+                    gapSeconds: sqlite3_column_double(stmt, 11), isDemo: demo
+                ))
+            }
+            return out
+        }
+    }
+
+    func transferCount(demo: Bool) -> Int {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM transfers WHERE is_demo = ?;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, demo ? 1 : 0)
+            return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
         }
     }
 

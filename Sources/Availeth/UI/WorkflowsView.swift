@@ -55,10 +55,22 @@ struct WorkflowsView: View {
             try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
             let spans = store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: demo)
-            let patterns = PatternMiner.mine(spans: spans)
-            let built = patterns.map { WorkflowInsighter.build($0, store: store, demo: demo) }
+            let transfers = store.transfers(from: range.startDate(), to: Date().addingTimeInterval(60), demo: demo)
+
+            // Transfers lead: a chore is defined by what moved between systems.
+            // Repeated window orders are kept as a weaker second source, and any
+            // sequence covering units a transfer pattern already explains is
+            // dropped so the same work is never listed twice.
+            let byTransfer = TransferMiner.mine(transfers: transfers, spans: spans)
+            let explained = Set(byTransfer.flatMap { $0.apps })
+            let bySequence = PatternMiner.mine(spans: spans).filter { p in
+                !p.apps.allSatisfy { explained.contains($0) }
+            }
+            let built = (byTransfer + bySequence)
+                .map { WorkflowInsighter.build($0, store: store, demo: demo) }
                 .sorted { a, b in
                     if a.automatable != b.automatable { return a.automatable }         // real candidates first
+                    if a.pattern.source != b.pattern.source { return a.pattern.source == .transfers }
                     return a.pattern.automationScore > b.pattern.automationScore
                 }
             if Task.isCancelled { return }
@@ -154,7 +166,7 @@ struct WorkflowCard: View {
                                 metric(value: Format.hours(pattern.estimatedHoursPerYear), label: "est. per year")
                                 metric(value: "~" + Format.money(pattern.estimatedYearlySaving(hourlyRate: hourlyRate)), label: "potential saving / yr", emphasized: true)
                             } else if !insight.automatable {
-                                Text("Likely needs a person")
+                                Text(insight.pattern.verdict?.level == .insufficient ? "Not enough evidence yet" : "Likely needs a person")
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(Theme.ink2)
                                     .padding(.horizontal, 9).padding(.vertical, 4)

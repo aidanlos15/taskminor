@@ -159,6 +159,12 @@ final class CaptureEngine: ObservableObject {
 
     /// The span currently being accumulated.
     private var openSpan: (bundleID: String, appName: String, title: String, start: Date, docPath: String)?
+    /// Label of the text field currently in focus, as last pushed to the monitor.
+    private var currentFieldLabel = ""
+    /// The most recent copy or cut, waiting for a paste somewhere else.
+    private var lastCopy: (at: Date, bundleID: String, app: String, title: String)?
+    /// A paste this long after the copy is no longer treated as the same movement.
+    private let transferWindow: TimeInterval = 90
     /// Raw title seen on the previous tick — a new title must be stable for two
     /// consecutive ticks before it splits the span (defeats ticking-clock titles).
     private var previousTickTitle: String?
@@ -306,7 +312,10 @@ final class CaptureEngine: ObservableObject {
     private func syncInputMonitor() {
         inputMonitor.mode = telemetryMode
         inputMonitor.onNeedFieldRefresh = { [weak self] in self?.refreshFieldContextAsync() }
-        inputMonitor.onAction = { [weak self] reason in self?.scheduleActionCapture(reason: reason) }
+        inputMonitor.onAction = { [weak self] reason in
+            self?.noteTransfer(reason)
+            self?.scheduleActionCapture(reason: reason)
+        }
         let live = isObserving && !suspended && !isPaused
             && telemetryMode != .off && Permissions.inputMonitoringGranted
         if live {
@@ -343,11 +352,13 @@ final class CaptureEngine: ObservableObject {
     /// attribute typing to. Only genuine text inputs get a label.
     private func applyFieldContext(_ info: (label: String, isSecure: Bool, isTextInput: Bool)?, deep: Bool) {
         guard let info else {
+            currentFieldLabel = ""
             inputMonitor.setField(label: "", secure: false, className: nil)
             return
         }
         let label = (info.isTextInput && !info.isSecure) ? info.label : ""
         let className = (deep && !label.isEmpty) ? FieldClassifier.classify(label) : nil
+        currentFieldLabel = label
         inputMonitor.setField(label: label, secure: info.isSecure, className: className)
     }
 
@@ -544,9 +555,48 @@ final class CaptureEngine: ObservableObject {
             closeOpenSpan(end: now)
         }
         // File identity (path only, never contents) — read once when the span opens.
-        let docPath = (fileTrackingEnabled ? AXReader.focusedDocumentPath(pid: pid) : nil) ?? ""
+        var docPath = (fileTrackingEnabled ? AXReader.focusedDocumentPath(pid: pid) : nil) ?? ""
+        // For a browser, the page pattern (site plus path with ids removed) is the
+        // document identity. It is title-grade information under the same
+        // permission as the title, and it is what tells invoicing apart from
+        // scheduling when both windows are just called "Jobber".
+        if docPath.isEmpty, AXReader.isTrusted, WorkflowUnit.isBrowser(bundleID: bundleID),
+           let url = AXReader.focusedBrowserURL(pid: pid) {
+            docPath = WorkflowUnit.pagePattern(url)
+        }
         inputMonitor.reset() // start counting fresh for this span
         openSpan = (bundleID, appName, rawTitle, now, docPath)
+    }
+
+    /// Turns a copy followed by a paste in a different context into a Transfer
+    /// row. Only ever sees actions the monitor let through, so excluded apps and
+    /// secure fields never appear here. Structure only: which window the data
+    /// left, which window and field it landed in.
+    private func noteTransfer(_ reason: String) {
+        guard let span = openSpan else { return }
+        let now = Date()
+        switch reason {
+        case "Copied", "Cut":
+            lastCopy = (now, span.bundleID, span.appName, span.title)
+        case "Pasted":
+            guard let c = lastCopy, now.timeIntervalSince(c.at) <= transferWindow else { return }
+            let sameContext = c.bundleID == span.bundleID && c.title == span.title
+            guard !sameContext else { return }   // a paste within the same window is editing, not a transfer
+            let t = Transfer(
+                at: now,
+                fromBundleID: c.bundleID, fromApp: c.app,
+                fromUnit: WorkflowUnit.label(app: c.app, title: c.title), fromTitle: c.title,
+                toBundleID: span.bundleID, toApp: span.appName,
+                toUnit: WorkflowUnit.label(app: span.appName, title: span.title), toTitle: span.title,
+                toField: currentFieldLabel,
+                gapSeconds: now.timeIntervalSince(c.at)
+            )
+            store.insert(transfer: t)
+            lastCopy = nil   // one copy feeds one transfer
+            onSpanSaved?()
+        default:
+            break
+        }
     }
 
     private func closeOpenSpan(end: Date? = nil) {

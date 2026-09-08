@@ -219,6 +219,48 @@ enum DemoData {
 
     /// A couple of away-from-keyboard stretches so idle handling is visible in
     /// the demo (e.g. a lunch break and an end-of-day gap).
+    /// The copy-and-paste movements behind the invoice and CRM loops, derived
+    /// from the generated spans so the two always line up. Generating them
+    /// independently produced transfers that fell outside their own runs, which
+    /// left the miner with no fields and made a clean invoice loop look like
+    /// reading. Structure only, as with a real capture.
+    static func generateTransfers(now: Date = Date()) -> [Transfer] {
+        let spans = generate(now: now)
+        var out: [Transfer] = []
+
+        /// The field a paste landed in, taken from the destination span.
+        func field(_ span: ActivitySpan, _ preferred: String) -> String {
+            let names = span.fields.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            return names.first { $0.hasPrefix(preferred) } ?? names.first ?? ""
+        }
+
+        for (i, span) in spans.enumerated() where i > 0 {
+            let prev = spans[i - 1]
+            // The invoice loop's two hops: mail into the spreadsheet, spreadsheet
+            // into the ERP. Both are marked in the spans by a copy then a paste.
+            guard prev.shortcuts.contains("⌘C") || prev.shortcuts.contains("⌘S"),
+                  span.shortcuts.contains("⌘V"),
+                  prev.appName != span.appName else { continue }
+            let gap = max(3, span.start.timeIntervalSince(prev.end))
+            guard gap < 90 else { continue }
+
+            // A paste that fills several fields is several movements.
+            let targets = span.fields.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let count = max(1, min(3, targets.count))
+            for k in 0..<count {
+                out.append(Transfer(
+                    at: span.start.addingTimeInterval(Double(k) * 12 + 5),
+                    fromBundleID: prev.bundleID, fromApp: prev.appName,
+                    fromUnit: WorkflowUnit.label(app: prev.appName, title: prev.windowTitle), fromTitle: prev.windowTitle,
+                    toBundleID: span.bundleID, toApp: span.appName,
+                    toUnit: WorkflowUnit.label(app: span.appName, title: span.windowTitle), toTitle: span.windowTitle,
+                    toField: k < targets.count ? targets[k] : field(span, ""),
+                    gapSeconds: gap, isDemo: true))
+            }
+        }
+        return out
+    }
+
     static func generateIdleSessions(now: Date = Date()) -> [IdleSession] {
         let cal = Calendar.current
         var out: [IdleSession] = []

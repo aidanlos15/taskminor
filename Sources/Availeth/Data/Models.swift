@@ -256,6 +256,34 @@ struct DailyTotal: Identifiable, Equatable {
 
 /// A repeated cross-app sequence detected by the pattern miner —
 /// a candidate workflow that could be automated.
+/// One movement of data between two contexts: a copy or cut in one place followed
+/// within a short window by a paste somewhere else. This is the primary evidence
+/// of a mechanical chore, and it is structure only: which app and window the data
+/// left, which app, window and field it landed in, and how long that took. Never
+/// what was copied.
+struct Transfer: Identifiable, Equatable {
+    var id: Int64 = 0
+    /// Moment of the paste.
+    var at: Date
+    var fromBundleID: String
+    var fromApp: String
+    /// Workflow unit of the source (site for browsers, app otherwise).
+    var fromUnit: String
+    var fromTitle: String
+    var toBundleID: String
+    var toApp: String
+    var toUnit: String
+    var toTitle: String
+    /// On-screen label of the field pasted into, "" if none was in focus.
+    var toField: String
+    /// Seconds between the copy and the paste.
+    var gapSeconds: TimeInterval
+    var isDemo: Bool = false
+
+    /// "Excel → NetSuite", the hop this transfer represents.
+    var hop: String { "\(fromUnit) → \(toUnit)" }
+}
+
 struct WorkflowPattern: Identifiable, Equatable {
     var id: String { apps.joined(separator: ">") }
     /// Ordered app names forming the repeated sequence, e.g. ["Mail", "Preview", "Excel", "Chrome"].
@@ -278,6 +306,18 @@ struct WorkflowPattern: Identifiable, Equatable {
     /// The most representative window title for each app step, in order — a
     /// clearer "what happened at each step" than the bare app names.
     var stepLabels: [String] = []
+
+    /// Where the pattern came from. Transfer-derived patterns are built from
+    /// copy-and-paste movements between contexts and are the primary evidence;
+    /// sequence-derived ones come from repeated window orders and are weaker.
+    enum Source: String, Equatable { case transfers, sequence }
+    var source: Source = .sequence
+    /// Field labels pasted or typed into on at least half the runs.
+    var fields: [String] = []
+    /// Cross-context copy-and-paste movements across all occurrences.
+    var transferCount: Int = 0
+    /// The shared automation judgement, when it has been computed.
+    var verdict: Verdict? = nil
 
     /// A single (possibly partial) observed day is too thin to annualize —
     /// the UI shows projections only when this is true.

@@ -113,6 +113,9 @@ final class AppState: ObservableObject {
         if store.narrativeCount(demo: true) == 0 {
             DemoData.generateNarratives().forEach { store.insertNarrative($0) }
         }
+        if store.transferCount(demo: true) == 0 {
+            DemoData.generateTransfers().forEach { store.insert(transfer: $0) }
+        }
         if store.idleSessions(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
             DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
         }
@@ -184,6 +187,7 @@ final class AppState: ObservableObject {
         store.deleteSummaries(scope: .demo)
         store.insertBatch(DemoData.generate())
         DemoData.generateNarratives().forEach { store.insertNarrative($0) }
+        DemoData.generateTransfers().forEach { store.insert(transfer: $0) }
         DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
         DemoData.seedSummaries(into: store)
         dataVersion += 1
