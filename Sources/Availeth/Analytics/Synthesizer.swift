@@ -37,25 +37,45 @@ final class Synthesizer {
     // MARK: - Orchestration (live data)
 
     /// Synthesizes any complete minutes since the last run, then groups closed
-    /// runs of minutes into tasks. Safe to call repeatedly; no-op if already busy
-    /// or the local model is unavailable.
+    /// runs of minutes into tasks. Safe to call repeatedly; no-op only if already
+    /// busy.
+    ///
+    /// It runs with or without a local model. `summarize` sends no image, so the
+    /// story layer needs the TEXT model, not the vision one. With no model at all
+    /// every minute still gets a deterministic line built from the captured
+    /// signals, because writing nothing leaves the user staring at an empty tab
+    /// with no way to tell that anything is wrong.
     func run(now: Date = Date()) async {
         guard !isRunning else { return }
-        guard await interpreter.isAvailable() else { return }
         isRunning = true
         defer { isRunning = false }
 
-        await synthesizeMinutes(now: now)
-        await groupTasks(now: now)
+        let modelReady = await interpreter.isTextAvailable()
+        await synthesizeMinutes(now: now, modelReady: modelReady)
+        await groupTasks(now: now, modelReady: modelReady)
     }
 
-    private func synthesizeMinutes(now: Date) async {
+    private func synthesizeMinutes(now: Date, modelReady: Bool) async {
         let currentMinute = Self.floorToMinute(now)
         // Resume from the durable store, not a separate watermark that could
         // rewind on a crash. First run: only the recent window.
         let resumeFrom = store.latestMinuteStart(demo: false)?.addingTimeInterval(60)
             ?? Self.floorToMinute(now.addingTimeInterval(-firstRunLookback))
         var minute = Self.floorToMinute(resumeFrom)
+
+        // Skip forward over dead time instead of writing a placeholder row for
+        // every empty minute. On a fresh install the resume point is two hours
+        // back, and at 8 minutes a run that is about 22 minutes of walking
+        // through nothing before the first real minute is reached. Jump straight
+        // to the first captured activity.
+        if let firstActivity = store.spans(from: minute, to: currentMinute, demo: false).first {
+            minute = max(minute, Self.floorToMinute(firstActivity.start))
+        } else {
+            // Nothing captured in the whole window: settle at the current minute
+            // so the next run starts from now rather than two hours ago.
+            minute = currentMinute
+        }
+
         var processed = 0
 
         while minute < currentMinute && processed < config.maxMinutesPerRun {
@@ -69,11 +89,12 @@ final class Synthesizer {
                     // Settled immediately (task_id = -1) so it never groups into a
                     // task and never re-fetches as ungrouped.
                     store.insertMinuteSummary(ctx.summary(text: "Away from keyboard", taskID: -1))
-                } else if let text = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 180) {
+                } else if modelReady, let text = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 180) {
                     store.insertMinuteSummary(ctx.summary(text: text))
                 } else {
-                    // Model failed — plain signal-derived line so the minute isn't
-                    // lost or endlessly retried (the UNIQUE index prevents dupes).
+                    // No model, or the model failed. A line built from the signals
+                    // so the minute isn't lost or endlessly retried (the UNIQUE
+                    // index prevents dupes).
                     store.insertMinuteSummary(ctx.summary(text: ctx.fallbackText))
                 }
             } else {
@@ -86,7 +107,7 @@ final class Synthesizer {
         }
     }
 
-    private func groupTasks(now: Date) async {
+    private func groupTasks(now: Date, modelReady: Bool) async {
         // Away/empty/noise minutes already carry task_id = -1, so the query only
         // returns real ungrouped work minutes.
         let minutes = store.ungroupedMinuteSummaries(demo: false)
@@ -99,7 +120,7 @@ final class Synthesizer {
                 store.settleMinutes(group.map(\.id))
                 continue
             }
-            guard let task = await makeTask(from: group) else { continue }
+            guard let task = await makeTask(from: group, modelReady: modelReady) else { continue }
             store.insertTaskAndLink(task, minuteIDs: group.map(\.id))
         }
     }
@@ -111,12 +132,13 @@ final class Synthesizer {
         return (m.keystrokes + m.clicks) < 20 && m.sourceCount < 2
     }
 
-    private func makeTask(from group: [MinuteSummary]) async -> TaskSummary? {
+    private func makeTask(from group: [MinuteSummary], modelReady: Bool) async -> TaskSummary? {
         guard let first = group.first, let last = group.last else { return nil }
         let apps = Self.mergedApps(group)
-        let prompt = Self.taskPrompt(group: group, apps: apps)
-        let raw = await interpreter.summarize(prompt: prompt, maxTokens: 400)
-        let (title, story) = Self.parseTitleAndStory(raw, fallbackApps: apps, fallbackStory: "Worked across \(apps.joined(separator: ", ")).")
+        let raw = modelReady
+            ? await interpreter.summarize(prompt: Self.taskPrompt(group: group, apps: apps), maxTokens: 400)
+            : nil
+        let (title, story) = Self.parseTitleAndStory(raw, fallbackApps: apps, fallbackStory: Self.signalStory(group: group, apps: apps))
         let automatable = Self.automatableAssessment(group)
         return TaskSummary(
             start: first.minuteStart,
@@ -165,10 +187,23 @@ final class Synthesizer {
             return lines.joined(separator: "\n")
         }
 
+        /// What the minute reads as with no model available. Every captured
+        /// signal is used, because "Worked in Excel, Chrome." is not worth
+        /// storing and tells the user nothing about what could be automated.
         var fallbackText: String {
-            let appPart = apps.prefix(3).joined(separator: ", ")
             if !sceneTexts.isEmpty { return sceneTexts[0] }
-            return "Worked in \(appPart)."
+            var parts: [String] = []
+            let appPart = apps.prefix(3).joined(separator: ", ")
+            parts.append(appPart.isEmpty ? "Worked on this Mac." : "Worked in \(appPart).")
+            if keystrokes > 0 || clicks > 0 {
+                var counts: [String] = []
+                if keystrokes > 0 { counts.append("\(keystrokes) keystroke\(keystrokes == 1 ? "" : "s")") }
+                if clicks > 0 { counts.append("\(clicks) click\(clicks == 1 ? "" : "s")") }
+                parts.append(counts.joined(separator: ", ") + ".")
+            }
+            if !shortcuts.isEmpty { parts.append("Shortcuts: \(shortcuts).") }
+            if !fields.isEmpty { parts.append("Typed into \(fields).") }
+            return parts.joined(separator: " ")
         }
 
         func summary(text: String, taskID: Int64 = 0) -> MinuteSummary {
@@ -255,6 +290,57 @@ final class Synthesizer {
             }
         }
         return (closed, pending)
+    }
+
+    /// A task story built from the captured signals alone, for when no local
+    /// model is available. Deliberately factual: how long, which apps, how much
+    /// typing, which shortcuts and fields. That is the material an automation
+    /// judgement is made from, so the tab is useful before any model is pulled.
+    static func signalStory(group: [MinuteSummary], apps: [String]) -> String {
+        let minutes = group.count
+        let keys = group.reduce(0) { $0 + $1.keystrokes }
+        let clicks = group.reduce(0) { $0 + $1.clicks }
+        let shortcuts = topTokens(group.map(\.shortcuts), limit: 4)
+        let fields = topTokens(group.map(\.fields), limit: 4)
+
+        var parts: [String] = []
+        let appPart = apps.isEmpty ? "this Mac" : apps.prefix(4).joined(separator: ", ")
+        parts.append("\(minutes) minute\(minutes == 1 ? "" : "s") across \(appPart).")
+        if keys > 0 || clicks > 0 {
+            var counts: [String] = []
+            if keys > 0 { counts.append("\(keys) keystroke\(keys == 1 ? "" : "s")") }
+            if clicks > 0 { counts.append("\(clicks) click\(clicks == 1 ? "" : "s")") }
+            parts.append(counts.joined(separator: " and ") + ".")
+        }
+        if !shortcuts.isEmpty { parts.append("Shortcuts used: \(shortcuts.joined(separator: ", ")).") }
+        if !fields.isEmpty { parts.append("Fields typed into: \(fields.joined(separator: ", ")).") }
+        parts.append("Pull a local text model for a written account of this task.")
+        return parts.joined(separator: " ")
+    }
+
+    /// Most frequent comma-separated tokens across a set of stored lists.
+    /// Shortcut tokens carry their own count ("⌘V×3"); those are merged by key
+    /// and the counts summed, so "↵×1" and "↵×3" read as "↵×4" rather than two
+    /// separate entries.
+    static func topTokens(_ lists: [String], limit: Int) -> [String] {
+        var counts: [String: Int] = [:]
+        var counted: Set<String> = []
+        for list in lists {
+            for token in list.split(separator: ",") {
+                let t = token.trimmingCharacters(in: .whitespaces)
+                guard !t.isEmpty else { continue }
+                if let x = t.lastIndex(of: "×"), let n = Int(t[t.index(after: x)...]) {
+                    let key = String(t[..<x])
+                    counts[key, default: 0] += n
+                    counted.insert(key)
+                } else {
+                    counts[t, default: 0] += 1
+                }
+            }
+        }
+        return counts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .prefix(limit)
+            .map { counted.contains($0.key) ? "\($0.key)×\($0.value)" : $0.key }
     }
 
     static func mergedApps(_ minutes: [MinuteSummary]) -> [String] {

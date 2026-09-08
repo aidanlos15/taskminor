@@ -149,3 +149,160 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertEqual(Synthesizer.floorToMinute(Date(timeIntervalSince1970: 1_699_999_980)).timeIntervalSince1970, 1_699_999_980, accuracy: 0.0001)
     }
 }
+
+// MARK: - Running with no local model
+//
+// The whole story layer used to sit behind `guard await interpreter.isAvailable()`,
+// so a Mac with no Ollama produced no minute summaries, no tasks and a Story tab
+// that told the user to keep waiting for something that would never arrive.
+
+/// Answers "not available" to everything, like a Mac with no Ollama installed.
+private final class UnavailableInterpreter: SceneInterpreter {
+    var displayName: String { "none" }
+    func isAvailable() async -> Bool { false }
+    func isTextAvailable() async -> Bool { false }
+    func narrate(pngData: Data, context: SceneContext) async -> String? { nil }
+    func summarize(prompt: String, maxTokens: Int) async -> String? {
+        XCTFail("summarize must not be called when no model is available")
+        return nil
+    }
+}
+
+final class SynthesizerNoModelTests: XCTestCase {
+    private func tempStore() -> Store {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("av-nomodel-\(UUID().uuidString).sqlite")
+        return Store(url: url)
+    }
+
+    /// With no model, every complete minute is still summarized. Before the fix
+    /// this produced zero rows.
+    func testMinutesAreStillSummarizedWithNoModel() async {
+        let store = tempStore()
+        let now = Date()
+        let minuteStart = Synthesizer.floorToMinute(now.addingTimeInterval(-120))
+        _ = store.insert(ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel",
+                                      windowTitle: "Purchase Orders.xlsx",
+                                      start: minuteStart, end: minuteStart.addingTimeInterval(50),
+                                      isDemo: false, keystrokes: 120, clicks: 8,
+                                      shortcuts: "Copy, Paste", fields: "Amount"))
+
+        // The first run walks forward from two hours ago, 8 minutes at a time, so
+        // widen the budget to reach a span two minutes old inside one call.
+        var cfg = Synthesizer.Config(); cfg.maxMinutesPerRun = 200
+        let synth = Synthesizer(store: store, interpreter: UnavailableInterpreter(), config: cfg)
+        await synth.run(now: now)
+
+        let summaries = store.minuteSummaries(from: minuteStart, to: now, demo: false)
+        XCTAssertFalse(summaries.isEmpty, "no model must not mean no summaries")
+    }
+
+    /// The no-model line carries the signals an automation judgement needs, not
+    /// just a list of app names.
+    func testFallbackTextUsesEverySignal() {
+        let ctx = Synthesizer.MinuteContext(
+            minute: Date(), apps: ["Microsoft Excel", "Google Chrome"],
+            keystrokes: 340, clicks: 24, shortcuts: "Copy, Paste",
+            fields: "Amount, Invoice Number", sceneTexts: [], sourceCount: 2, isAway: false)
+        let text = ctx.fallbackText
+        XCTAssertTrue(text.contains("Microsoft Excel"), text)
+        XCTAssertTrue(text.contains("340 keystrokes"), text)
+        XCTAssertTrue(text.contains("24 clicks"), text)
+        XCTAssertTrue(text.contains("Copy, Paste"), text)
+        XCTAssertTrue(text.contains("Amount, Invoice Number"), text)
+    }
+
+    /// Singular units read correctly, so the line never says "1 keystrokes".
+    func testFallbackTextSingularUnits() {
+        let ctx = Synthesizer.MinuteContext(
+            minute: Date(), apps: ["Mail"], keystrokes: 1, clicks: 1,
+            shortcuts: "", fields: "", sceneTexts: [], sourceCount: 1, isAway: false)
+        XCTAssertTrue(ctx.fallbackText.contains("1 keystroke,"), ctx.fallbackText)
+        XCTAssertTrue(ctx.fallbackText.contains("1 click."), ctx.fallbackText)
+    }
+
+    /// A scene narrative, when one exists, still wins over the generic line.
+    func testSceneTextWinsOverGenericLine() {
+        let ctx = Synthesizer.MinuteContext(
+            minute: Date(), apps: ["Google Chrome"], keystrokes: 10, clicks: 2,
+            shortcuts: "", fields: "", sceneTexts: ["Submitting a vendor bill in NetSuite."],
+            sourceCount: 1, isAway: false)
+        XCTAssertEqual(ctx.fallbackText, "Submitting a vendor bill in NetSuite.")
+    }
+
+    /// The task-level story is built from the signals when no model can write it.
+    func testSignalStoryDescribesTheTask() {
+        let mins = [
+            MinuteSummary(minuteStart: Date(), text: "", apps: "Microsoft Excel", keystrokes: 200, clicks: 10,
+                          shortcuts: "Copy, Paste", fields: "Amount", sourceCount: 1),
+            MinuteSummary(minuteStart: Date().addingTimeInterval(60), text: "", apps: "Google Chrome", keystrokes: 140, clicks: 14,
+                          shortcuts: "Paste, Find", fields: "Invoice Number", sourceCount: 1),
+        ]
+        let story = Synthesizer.signalStory(group: mins, apps: ["Microsoft Excel", "Google Chrome"])
+        XCTAssertTrue(story.contains("2 minutes"), story)
+        XCTAssertTrue(story.contains("340 keystrokes"), story)
+        XCTAssertTrue(story.contains("Paste"), story)
+        XCTAssertTrue(story.contains("Amount"), story)
+    }
+
+    /// The most-used shortcuts and fields come first, so the story names the
+    /// repeated action rather than an incidental one.
+    func testTopTokensRanksByFrequency() {
+        let top = Synthesizer.topTokens(["Copy, Paste", "Paste", "Paste, Find"], limit: 2)
+        XCTAssertEqual(top.first, "Paste")
+        XCTAssertEqual(top.count, 2)
+    }
+
+    /// Shortcut tokens carry counts; the same key across minutes sums rather
+    /// than appearing once per minute.
+    func testTopTokensMergesShortcutCounts() {
+        let top = Synthesizer.topTokens(["↵×1, ⌘V×2", "↵×3", "⌘V×1, Tab×4"], limit: 3)
+        XCTAssertEqual(top, ["Tab×4", "↵×4", "⌘V×3"], "ties sort by key: \(top)")
+    }
+}
+
+extension SynthesizerNoModelTests {
+    /// A fresh install must not walk through two hours of empty minutes one at a
+    /// time. It jumps to the first captured activity, so the first real summary
+    /// appears on the first run rather than 22 minutes later.
+    func testFirstRunSkipsDeadTimeAndSummarizesRealActivity() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("av-skip-\(UUID().uuidString).sqlite")
+        let store = Store(url: url)
+        let now = Date()
+        // Activity 3 minutes ago; the lookback window opens 2 hours ago.
+        let spanStart = Synthesizer.floorToMinute(now.addingTimeInterval(-180))
+        _ = store.insert(ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel",
+                                      windowTitle: "Purchase Orders.xlsx",
+                                      start: spanStart, end: spanStart.addingTimeInterval(50),
+                                      isDemo: false, keystrokes: 90, clicks: 6,
+                                      shortcuts: "Copy", fields: "Amount"))
+
+        // Default budget of 8 minutes per run: only reachable if dead time is skipped.
+        let synth = Synthesizer(store: store, interpreter: UnavailableInterpreter())
+        await synth.run(now: now)
+
+        let written = store.minuteSummaries(from: spanStart, to: now, demo: false)
+        XCTAssertTrue(written.contains { $0.text.contains("Microsoft Excel") },
+                      "the first run should reach real activity, got: \(written.map(\.text))")
+    }
+}
+
+/// Onboarding must not be marked complete when the user granted nothing.
+/// A single stray click on the first launch used to cost the app every
+/// capability permanently, with no second ask.
+final class OnboardingGateTests: XCTestCase {
+    /// Mirrors WelcomeSheet.finish()'s decision so the rule is pinned by a test
+    /// even though the sheet itself needs a running app to exercise.
+    private func shouldMarkOnboarded(ax: Bool, screen: Bool, input: Bool) -> Bool {
+        ax || screen || input
+    }
+
+    func testNothingGrantedDoesNotCompleteOnboarding() {
+        XCTAssertFalse(shouldMarkOnboarded(ax: false, screen: false, input: false))
+    }
+
+    func testAnySingleGrantCompletesOnboarding() {
+        XCTAssertTrue(shouldMarkOnboarded(ax: true, screen: false, input: false))
+        XCTAssertTrue(shouldMarkOnboarded(ax: false, screen: true, input: false))
+        XCTAssertTrue(shouldMarkOnboarded(ax: false, screen: false, input: true))
+    }
+}

@@ -6,8 +6,13 @@ import Foundation
 protocol SceneInterpreter {
     /// Human-readable name shown in the UI (e.g. "Qwen2.5-VL (local)").
     var displayName: String { get }
-    /// Whether the interpreter is reachable/ready right now.
+    /// Whether the VISION model is reachable/ready right now. Storyline capture
+    /// needs this; nothing else does.
     func isAvailable() async -> Bool
+    /// Whether the TEXT model is reachable/ready right now. `summarize` sends no
+    /// image, so the story layer needs only this, and a text model is a fraction
+    /// of the download of a vision one.
+    func isTextAvailable() async -> Bool
     /// Produce a short narrative for the frame. `context` carries the app/window
     /// so the model has grounding. Returns nil on failure.
     func narrate(pngData: Data, context: SceneContext) async -> String?
@@ -50,7 +55,12 @@ enum NarrativeSanitizer {
 /// (127.0.0.1:11434) — the frame is sent to a process on THIS machine only and
 /// never touches the internet.
 final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegate {
-    let model: String
+    /// Reads screen frames. Must be a vision model.
+    let visionModel: String
+    /// Writes the minute and task stories from signals. `summarize` sends no
+    /// image, so this can be a small text-only model (qwen2.5:3b is 1.9 GB
+    /// against 6.0 GB for qwen2.5vl:7b).
+    let textModel: String
     private let endpoint: URL
     private let host: String
     private lazy var session: URLSession = {
@@ -61,8 +71,9 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
-    init(model: String = "qwen2.5vl:7b", host: String = "http://127.0.0.1:11434") {
-        self.model = model
+    init(visionModel: String = "qwen2.5vl:7b", textModel: String = "qwen2.5:3b", host: String = "http://127.0.0.1:11434") {
+        self.visionModel = visionModel
+        self.textModel = textModel
         self.host = host
         self.endpoint = URL(string: "\(host)/api/generate")!
         super.init()
@@ -76,21 +87,31 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
         completionHandler(nil)
     }
 
-    var displayName: String { "\(model) (local)" }
+    var displayName: String { "\(visionModel) (local)" }
+    var textDisplayName: String { "\(textModel) (local)" }
 
-    func isAvailable() async -> Bool {
-        guard let url = URL(string: endpoint.absoluteString.replacingOccurrences(of: "/api/generate", with: "/api/tags")) else { return false }
+    func isAvailable() async -> Bool { await isPulled(visionModel) }
+    func isTextAvailable() async -> Bool { await isPulled(textModel) }
+
+    /// Names of every model the local daemon has pulled. Empty if it is not running.
+    private func pulledModels() async -> [String] {
+        guard let url = URL(string: endpoint.absoluteString.replacingOccurrences(of: "/api/generate", with: "/api/tags")) else { return [] }
         var req = URLRequest(url: url)
         req.timeoutInterval = 3
         guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let models = json["models"] as? [[String: Any]] else {
-            return false
+            return []
         }
-        // Available if the daemon is up and our model (or any qwen vl) is pulled.
-        let names = models.compactMap { $0["name"] as? String }
-        return names.contains { $0 == model || $0.hasPrefix(model.components(separatedBy: ":").first ?? model) }
+        return models.compactMap { $0["name"] as? String }
+    }
+
+    /// True if the daemon is up and this model (or another tag of its family) is pulled.
+    private func isPulled(_ wanted: String) async -> Bool {
+        let names = await pulledModels()
+        let family = wanted.components(separatedBy: ":").first ?? wanted
+        return names.contains { $0 == wanted || $0.hasPrefix(family) }
     }
 
     /// Privacy-first: one content-free sentence (paired with the PII scrub).
@@ -122,7 +143,7 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
         let basePrompt = context.depth == .detailed ? Self.detailedPrompt : Self.activityPrompt
         let maxTokens = context.depth == .detailed ? 320 : 80
         let body: [String: Any] = [
-            "model": model,
+            "model": visionModel,
             "prompt": "\(basePrompt)\n\nApp: \(context.appName). Window: \(context.windowTitle).\(actionHint)",
             "images": [pngData.base64EncodedString()],
             "stream": false,
@@ -149,7 +170,7 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
 
     func summarize(prompt: String, maxTokens: Int) async -> String? {
         let body: [String: Any] = [
-            "model": model,
+            "model": textModel,
             "prompt": prompt,
             "stream": false,
             "keep_alive": "10m",
