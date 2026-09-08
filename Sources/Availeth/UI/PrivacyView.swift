@@ -12,12 +12,20 @@ struct PrivacyView: View {
     @State private var liveNarrativeCount = 0
     @State private var liveScreenshotCount = 0
     @State private var exclusionNames: [String: String] = [:]
+    @State private var showAddExclusion = false
+    @State private var exclusionSearch = ""
+    @State private var hoveredApp: String?
 
     private var dataSummary: String {
         var parts = ["\(liveSpanCount) activity records"]
         if liveNarrativeCount > 0 { parts.append("\(liveNarrativeCount) storyline notes") }
         if liveScreenshotCount > 0 { parts.append("\(liveScreenshotCount) thumbnails") }
         return parts.joined(separator: " · ") + " captured"
+    }
+
+    /// Console hairline used to separate rows within a panel.
+    private var hairline: some View {
+        Rectangle().fill(Theme.line).frame(height: 1)
     }
 
     var body: some View {
@@ -32,7 +40,7 @@ struct PrivacyView: View {
             }
             .padding(20)
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .scrollContentBackground(.hidden)
         .onAppear {
             launchAtLogin = state.launchAtLoginEnabled
             refreshDataCounts()
@@ -74,17 +82,15 @@ struct PrivacyView: View {
     private var statusCard: some View {
         Card(title: "Discovery", subtitle: "What Availeth is doing right now") {
             HStack(spacing: 12) {
-                Circle()
-                    .fill(state.engine.isPaused ? Color.orange : (state.engine.isObserving ? Color.green : Color.secondary))
-                    .frame(width: 10, height: 10)
+                StatusDot(color: state.engine.isPaused ? Theme.amber : (state.engine.isObserving ? Theme.good : Theme.ink3))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(statusTitle).font(.body.weight(.medium))
-                    Text(statusDetail).font(.caption).foregroundStyle(.secondary)
+                    Text(statusTitle).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
+                    Text(statusDetail).font(.caption).foregroundStyle(Theme.ink2)
                 }
                 Spacer()
                 if state.engine.isPaused {
                     Button("Resume") { state.engine.resume() }
-                        .buttonStyle(.borderedProminent).tint(.indigo)
+                        .buttonStyle(.bordered).tint(Theme.accent)
                 } else if state.engine.isObserving {
                     Menu("Pause") {
                         Button("For 15 minutes") { state.engine.pause(for: 15 * 60) }
@@ -95,11 +101,11 @@ struct PrivacyView: View {
                     Button("Stop") { state.engine.stop() }
                 } else {
                     Button("Start Discovery") { state.engine.start() }
-                        .buttonStyle(.borderedProminent).tint(.indigo)
+                        .buttonStyle(.bordered).tint(Theme.accent)
                 }
             }
 
-            Divider()
+            hairline
 
             Toggle(isOn: Binding(
                 get: { launchAtLogin },
@@ -109,14 +115,15 @@ struct PrivacyView: View {
                 }
             )) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Start Availeth at login")
+                    Text("Start Availeth at login").foregroundStyle(Theme.ink)
                     Text("Keeps discovery running across restarts")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.ink2)
                 }
             }
             .toggleStyle(.switch)
+            .tint(Theme.accent)
             if let launchAtLoginError {
-                Text(launchAtLoginError).font(.caption).foregroundStyle(.orange)
+                Text(launchAtLoginError).font(.caption).foregroundStyle(Theme.amber)
             }
         }
     }
@@ -139,19 +146,20 @@ struct PrivacyView: View {
     // MARK: - Window titles / Accessibility
 
     private var windowTitlesCard: some View {
-        Card(title: "Window-title capture", subtitle: "Optional — makes task grouping much richer") {
+        Card(title: "Window-title capture", subtitle: "Optional · richer task grouping") {
             HStack(spacing: 12) {
                 Image(systemName: axTrusted ? "checkmark.seal.fill" : "seal")
                     .font(.title3)
-                    .foregroundStyle(axTrusted ? .green : .secondary)
+                    .foregroundStyle(axTrusted ? Theme.good : Theme.ink3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(axTrusted ? "Enabled" : "Not enabled")
-                        .font(.body.weight(.medium))
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.ink)
                     Text(axTrusted
-                         ? "Availeth reads the focused window's title (e.g. “Purchase Orders.xlsx”) via macOS Accessibility. Read-only by design — Availeth never controls anything."
-                         : "Without this, Availeth only sees which app is frontmost. Grant Accessibility in System Settings to group time by document and page titles.")
+                         ? "Reads the focused window's title (e.g. “Purchase Orders.xlsx”) — read-only, never controls anything."
+                         : "Without this, Availeth only sees which app is frontmost. Grant Accessibility to group time by document.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -159,8 +167,8 @@ struct PrivacyView: View {
                     Button("Enable…") {
                         AXReader.requestTrust()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.indigo)
+                    .buttonStyle(.bordered)
+                    .tint(Theme.accent)
                 }
             }
         }
@@ -172,210 +180,142 @@ struct PrivacyView: View {
     @State private var inputMonitoringGranted = Permissions.inputMonitoringGranted
 
     private var capabilitiesCard: some View {
-        Card(title: "Additional capture", subtitle: "Each is off by default, needs its own permission, and is shown in full in the Logs tab") {
+        Card(title: "Additional capture", subtitle: "Off by default · shown in the Logs tab") {
+            // Keyboard & mouse — a single on/off (on = the richest signal, which
+            // reads field labels but never the keys you press).
+            captureRow(
+                icon: "keyboard",
+                title: "Keyboard & mouse activity",
+                description: "Which shortcuts and fields a task uses — never the keys you type.",
+                on: Binding(
+                    get: { state.engine.telemetryMode != .off },
+                    set: { state.engine.telemetryMode = $0 ? .deep : .off }
+                )
+            ) {
+                if state.engine.telemetryMode != .off && !inputMonitoringGranted {
+                    permissionWarning("Needs Input Monitoring — grant it, then relaunch.",
+                                      grant: { requestInputMonitoring() })
+                } else if state.engine.telemetryMode != .off && !axTrusted {
+                    subNote("Field names also need Window-title capture, enabled above.")
+                }
+            }
+
+            hairline
+
+            // Screen capture — a single on/off. On always uses the local Storyline
+            // model at full detail (no sub-choice).
+            captureRow(
+                icon: "camera.viewfinder",
+                title: "Screen capture",
+                description: "A local model reads each new screen, then deletes the image — only text is kept.",
+                on: Binding(
+                    get: { state.engine.screenshotMode == .storyline },
+                    set: { on in
+                        if on {
+                            state.engine.captureDepth = .detailed   // always detailed — no user choice
+                            state.engine.screenshotMode = .storyline
+                        } else {
+                            state.engine.screenshotMode = .off
+                        }
+                    }
+                )
+            ) {
+                if state.engine.screenshotMode == .storyline {
+                    if !screenRecordingGranted {
+                        permissionWarning("Needs Screen Recording. Granted it already? macOS applies it after a relaunch.",
+                                          grant: {
+                                              Permissions.requestScreenRecording()
+                                              openSettings("com.apple.preference.security?Privacy_ScreenCapture")
+                                          }, relaunch: true)
+                    }
+                    HStack(spacing: 8) {
+                        StatusDot(color: state.engine.interpreterReady ? Theme.good : Theme.amber, halo: false, size: 7)
+                        Text(state.engine.interpreterReady
+                             ? "Local model ready: \(state.engine.sceneInterpreterName)"
+                             : "Local model not reachable — start Ollama and pull a vision model (e.g. qwen2.5vl:7b).")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, 33)
+                }
+            }
+
+            hairline
+
+            // File tracking — already a simple on/off.
+            captureRow(
+                icon: "doc.text.magnifyingglass",
+                title: "File tracking (identity only)",
+                description: "Which document is open — its name and path, never the contents.",
+                on: Binding(get: { state.engine.fileTrackingEnabled }, set: { state.engine.fileTrackingEnabled = $0 })
+            ) {
+                if state.engine.fileTrackingEnabled && !axTrusted {
+                    permissionWarning("Needs Window-title capture (Accessibility) to identify files.",
+                                      grant: {
+                                          AXReader.requestTrust()
+                                          openSettings("com.apple.preference.security?Privacy_Accessibility")
+                                      })
+                }
+            }
+
+            hairline
+
             HStack {
-                Spacer()
                 Button {
                     state.welcomeRequested = true
                 } label: {
                     Label("Setup guide & permissions", systemImage: "sparkles")
                 }
                 .controlSize(.small)
-            }
-            interactionTelemetryRow
-            Divider()
-            screenCaptureRow
-            Divider()
-            capabilityRow(
-                icon: "doc.text.magnifyingglass",
-                title: "File tracking (identity only)",
-                on: Binding(get: { state.engine.fileTrackingEnabled }, set: { state.engine.fileTrackingEnabled = $0 }),
-                granted: axTrusted,
-                needsLabel: "Needs Window Titles (Accessibility)",
-                explanation: "Records which document is open in the focused window (its name and path) to enrich workflows — never the file's contents. Uses the Accessibility permission; no Full Disk Access.",
-                request: {
-                    AXReader.requestTrust()
-                    openSettings("com.apple.preference.security?Privacy_Accessibility")
-                }
-            )
-
-            Label {
-                Text("Raw keystroke content and file contents are deliberately not collected — the counts and identities above give the workflow signal without the sensitive data.")
-                    .font(.caption).foregroundStyle(.secondary)
-            } icon: {
-                Image(systemName: "info.circle").foregroundStyle(.indigo)
+                Spacer()
             }
         }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             screenRecordingGranted = Permissions.screenRecordingGranted
             inputMonitoringGranted = Permissions.inputMonitoringGranted
         }
-    }
-
-    private var screenCaptureRow: some View {
-        let mode = Binding(
-            get: { state.engine.screenshotMode },
-            set: { state.engine.screenshotMode = $0 }
-        )
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "camera.viewfinder")
-                    .frame(width: 22)
-                    .foregroundStyle(.indigo)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Screen capture")
-                        .font(.callout.weight(.medium))
-                    Text("Captures on screen changes to fill in workflows the other signals can't see.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                Picker("", selection: mode) {
-                    ForEach(ScreenshotMode.allCases) { m in
-                        Text(m.title).tag(m)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 230)
-            }
-            Text(state.engine.screenshotMode.blurb)
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.leading, 32)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if state.engine.screenshotMode != .off && !screenRecordingGranted {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                    Text("Needs Screen Recording — grant it, then relaunch Availeth.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Grant…") {
-                        Permissions.requestScreenRecording()
-                        openSettings("com.apple.preference.security?Privacy_ScreenCapture")
-                    }
-                    .controlSize(.small)
-                }
-                .padding(.leading, 32)
-            }
-            if state.engine.screenshotMode == .storyline {
-                HStack(spacing: 8) {
-                    Circle().fill(state.engine.interpreterReady ? Color.green : Color.orange).frame(width: 7, height: 7)
-                    Text(state.engine.interpreterReady
-                         ? "Local model ready: \(state.engine.sceneInterpreterName)"
-                         : "Local model not reachable — start Ollama and pull a vision model (e.g. qwen2.5vl:7b).")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.leading, 32)
-
-                // Depth dial: how much the model reads from each frame.
-                let depth = Binding(get: { state.engine.captureDepth }, set: { state.engine.captureDepth = $0 })
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Text("Detail level").font(.caption.weight(.medium))
-                        Picker("", selection: depth) {
-                            ForEach(CaptureDepth.allCases) { Text($0.title).tag($0) }
-                        }
-                        .labelsHidden().pickerStyle(.segmented).frame(width: 190)
-                    }
-                    Text(state.engine.captureDepth.blurb)
-                        .font(.caption2).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if state.engine.captureDepth == .detailed {
-                        Label("Detailed mode reads on-screen content (text, values, AI questions) into the story. Only use where you have consent.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption2).foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .padding(.leading, 32)
-            }
-        }
         .onAppear { if state.engine.screenshotMode == .storyline { state.engine.refreshInterpreterStatus() } }
     }
 
-    private var interactionTelemetryRow: some View {
-        let mode = Binding(
-            get: { state.engine.telemetryMode },
-            set: { state.engine.telemetryMode = $0 }
-        )
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "keyboard")
-                    .frame(width: 22)
-                    .foregroundStyle(.indigo)
+    /// One capability row: icon + title + one-line description + an on/off switch,
+    /// with optional permission/consent detail shown below only while it's on.
+    @ViewBuilder
+    private func captureRow<Extra: View>(icon: String, title: String, description: String, on: Binding<Bool>, @ViewBuilder extra: () -> Extra) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 11) {
+                Image(systemName: icon).font(.system(size: 15)).frame(width: 22).foregroundStyle(Theme.ink2)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Keyboard & mouse activity")
-                        .font(.callout.weight(.medium))
-                    Text("Sees how a task is done — which shortcuts you use, how you move between fields, how much typing it takes — but never records the actual keys you press.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.ink)
+                    Text(description).font(.caption).foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                Picker("", selection: mode) {
-                    ForEach(InputTelemetryMode.allCases) { m in
-                        Text(m.title).tag(m)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(width: 210)
+                Spacer(minLength: 12)
+                Toggle("", isOn: on).labelsHidden().toggleStyle(.switch).tint(Theme.accent)
             }
-            Text(state.engine.telemetryMode.blurb)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 32)
-                .fixedSize(horizontal: false, vertical: true)
-            if state.engine.telemetryMode != .off && !inputMonitoringGranted {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                    Text("Needs Input Monitoring — grant it, then relaunch Availeth.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Grant…") { requestInputMonitoring() }
-                    .controlSize(.small)
-                }
-                .padding(.leading, 32)
-            }
-            if state.engine.telemetryMode != .off && inputMonitoringGranted && !axTrusted {
-                Text("Shortcuts and counts work now. Field names also need Window Titles (Accessibility), enabled above.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.leading, 32)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            extra()
         }
     }
 
+    /// Amber permission warning with a Grant (and optional Relaunch) button.
     @ViewBuilder
-    private func capabilityRow(icon: String, title: String, on: Binding<Bool>, granted: Bool, needsLabel: String, explanation: String, request: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: icon)
-                    .frame(width: 22)
-                    .foregroundStyle(.indigo)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.callout.weight(.medium))
-                    Text(explanation)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                Toggle("", isOn: on)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
+    private func permissionWarning(_ text: String, grant: @escaping () -> Void, relaunch: Bool = false) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(Theme.amber)
+            Text(text).font(.caption).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+            Button("Grant…", action: grant).controlSize(.small)
+            if relaunch {
+                Button("Relaunch", systemImage: "arrow.clockwise") { Permissions.relaunchApp() }.controlSize(.small)
             }
-            if on.wrappedValue && !granted {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
-                    Text("\(needsLabel) — grant it for this to capture anything.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Grant…", action: request)
-                        .controlSize(.small)
-                }
-                .padding(.leading, 32)
-            }
+            Spacer(minLength: 0)
         }
+        .padding(.leading, 33)
+    }
+
+    @ViewBuilder
+    private func subNote(_ text: String) -> some View {
+        Text(text).font(.caption).foregroundStyle(Theme.ink2)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 33)
     }
 
     private func openSettings(_ anchor: String) {
@@ -397,48 +337,119 @@ struct PrivacyView: View {
     // MARK: - Exclusions
 
     private var exclusionsCard: some View {
-        Card(title: "Excluded apps", subtitle: "Availeth records nothing at all while these are in front — enforced locally, before anything is stored") {
-            VStack(alignment: .leading, spacing: 8) {
+        Card(title: "Excluded apps", subtitle: "Never recorded while in front") {
+            VStack(alignment: .leading, spacing: 12) {
                 if state.engine.excludedBundleIDs.isEmpty {
-                    Text("No exclusions configured.")
-                        .font(.caption).foregroundStyle(.tertiary)
+                    Text("Nothing is excluded — Availeth records every app. Add one below to leave an app out.")
+                        .font(.caption).foregroundStyle(Theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     FlowLayoutish(items: state.engine.excludedBundleIDs.sorted()) { bundleID in
-                        HStack(spacing: 5) {
-                            Text(displayName(for: bundleID))
-                                .font(.caption)
-                            Button {
-                                state.engine.excludedBundleIDs.remove(bundleID)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Remove exclusion")
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(.quaternary.opacity(0.6)))
+                        exclusionChip(bundleID)
                     }
                 }
 
-                Menu {
-                    ForEach(runningApps, id: \.bundleID) { app in
-                        Button(app.name) {
-                            state.engine.excludedBundleIDs.insert(app.bundleID)
-                        }
-                    }
+                Button {
+                    showAddExclusion = true
                 } label: {
-                    Label("Exclude a running app…", systemImage: "plus.circle")
+                    Label("Exclude an app…", systemImage: "plus")
+                        .font(.system(size: 12, weight: .medium))
                 }
-                .frame(maxWidth: 240)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(Theme.accent)
+                .popover(isPresented: $showAddExclusion, arrowEdge: .bottom) { addExclusionPopover }
 
-                Text("Exclusions work per app. Private browser windows can't be told apart from normal ones, so exclude the whole browser if that matters to you.")
+                Text("Exclusions are per app. Private browser windows look the same as normal ones, so exclude the whole browser if that matters.")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    /// A removable chip showing the excluded app's real icon and name.
+    private func exclusionChip(_ bundleID: String) -> some View {
+        HStack(spacing: 6) {
+            if let icon = appIcon(for: bundleID) {
+                Image(nsImage: icon).resizable().frame(width: 15, height: 15)
+            }
+            Text(displayName(for: bundleID))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            Button {
+                state.engine.excludedBundleIDs.remove(bundleID)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(Theme.ink3)
+                    .padding(3)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Stop excluding \(displayName(for: bundleID))")
+        }
+        .padding(.leading, 8).padding(.trailing, 4).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.panelHi))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
+    }
+
+    /// Searchable picker of running apps, each with its icon.
+    private var addExclusionPopover: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                TextField("Search apps", text: $exclusionSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+            }
+            .padding(.horizontal, 11).padding(.vertical, 9)
+            Rectangle().fill(Theme.line).frame(height: 1)
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    let apps = filteredRunningApps
+                    if apps.isEmpty {
+                        Text(exclusionSearch.isEmpty ? "No other apps running." : "No matches.")
+                            .font(.caption).foregroundStyle(Theme.ink3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 11).padding(.vertical, 12)
+                    } else {
+                        ForEach(apps, id: \.bundleID) { app in
+                            Button {
+                                state.engine.excludedBundleIDs.insert(app.bundleID)
+                                showAddExclusion = false
+                                exclusionSearch = ""
+                            } label: {
+                                HStack(spacing: 9) {
+                                    if let icon = appIcon(for: app.bundleID) {
+                                        Image(nsImage: icon).resizable().frame(width: 17, height: 17)
+                                    }
+                                    Text(app.name).font(.system(size: 13)).foregroundStyle(Theme.ink)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 11).padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(hoveredApp == app.bundleID ? Theme.accentDim : Color.clear)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .onHover { hoveredApp = $0 ? app.bundleID : (hoveredApp == app.bundleID ? nil : hoveredApp) }
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(height: 260)
+        }
+        .frame(width: 280)
+        .background(Theme.panel)
+    }
+
+    private var filteredRunningApps: [(bundleID: String, name: String)] {
+        let q = exclusionSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        return runningApps.filter { q.isEmpty || $0.name.lowercased().contains(q) }
     }
 
     private var runningApps: [(bundleID: String, name: String)] {
@@ -457,17 +468,26 @@ struct PrivacyView: View {
         exclusionNames[bundleID] ?? bundleID
     }
 
+    /// The app's Finder icon for a bundle ID (nil if the app isn't installed).
+    private func appIcon(for bundleID: String) -> NSImage? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
+        let icon = NSWorkspace.shared.icon(forFile: url.path)
+        icon.size = NSSize(width: 17, height: 17)
+        return icon
+    }
+
     // MARK: - Data
 
     private var dataCard: some View {
-        Card(title: "Your data", subtitle: "Everything stays in a local database on this Mac — nothing is uploaded anywhere") {
+        Card(title: "Your data", subtitle: "Stored locally · never uploaded") {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(dataSummary)
-                        .font(.body.weight(.medium))
+                        .font(.system(size: 13, weight: .medium)).numeric()
+                        .foregroundStyle(Theme.ink)
                     Text(state.store.url.path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.ink3)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -477,11 +497,12 @@ struct PrivacyView: View {
                 }
             }
 
-            Divider()
+            hairline
 
             HStack(spacing: 10) {
                 Button("Reset demo dataset") { state.resetDemoData() }
                 Button("Delete all my captured data", role: .destructive) { confirmDeleteLive = true }
+                    .tint(Theme.danger)
                     .confirmationDialog(
                         "Delete every activity record Availeth has captured on this Mac? The demo dataset is kept. This cannot be undone.",
                         isPresented: $confirmDeleteLive
@@ -491,11 +512,12 @@ struct PrivacyView: View {
                 Spacer()
                 HStack(spacing: 6) {
                     Text("Rate for estimates:")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Theme.ink2)
                     TextField("45", value: $state.hourlyRate, format: .number)
                         .textFieldStyle(.roundedBorder)
+                        .numeric()
                         .frame(width: 60)
-                    Text("$/hr").font(.caption).foregroundStyle(.secondary)
+                    Text("$/hr").font(.caption).foregroundStyle(Theme.ink2)
                 }
             }
         }
@@ -517,10 +539,10 @@ struct PrivacyView: View {
                     HStack(spacing: 10) {
                         Image(systemName: icon)
                             .frame(width: 20)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Theme.good)
                         Text(text)
                             .font(.callout)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.ink2)
                     }
                 }
             }

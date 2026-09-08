@@ -11,30 +11,33 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(Format.duration(state.engine.observedTodaySeconds))
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .font(.system(size: 30, weight: .bold)).numeric()
+                    .foregroundStyle(Theme.ink)
                     .contentTransition(.numericText())
-                Text("observed today")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text("observed today").microLabel()
             }
 
             topAppsToday
 
-            Divider()
+            Rectangle().fill(Theme.line).frame(height: 1)
 
             controlButtons
         }
         .padding(16)
         .frame(width: 300)
+        .background(Theme.bg)
+        .tint(Theme.accent)
     }
 
     private var header: some View {
         HStack(spacing: 10) {
             LogoMark(size: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Availeth").font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Availeth")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Theme.ink)
                 statusLine
             }
             Spacer()
@@ -44,21 +47,27 @@ struct MenuBarView: View {
     @ViewBuilder
     private var statusLine: some View {
         if state.engine.isPaused {
-            Label("Paused", systemImage: "pause.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.orange)
+            HStack(spacing: 6) {
+                StatusDot(color: Theme.amber, halo: false)
+                Text("Paused")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.ink2)
+            }
         } else if state.engine.isObserving {
-            HStack(spacing: 5) {
-                Circle().fill(.green).frame(width: 7, height: 7)
+            HStack(spacing: 6) {
+                StatusDot(color: Theme.good)
                 Text(state.engine.currentAppName.map { "Observing \($0)" } ?? "Discovery active")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.ink2)
                     .lineLimit(1)
             }
         } else {
-            Label("Stopped", systemImage: "stop.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                StatusDot(color: Theme.ink3, halo: false)
+                Text("Stopped")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.ink2)
+            }
         }
     }
 
@@ -68,25 +77,29 @@ struct MenuBarView: View {
         return Group {
             if totals.isEmpty {
                 Text("No activity captured yet today.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.ink3)
             } else {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 7) {
                     ForEach(totals) { app in
-                        HStack(spacing: 8) {
+                        HStack(spacing: 9) {
                             Circle()
                                 .fill(AppPalette.color(for: app.appName))
-                                .frame(width: 8, height: 8)
+                                .frame(width: 7, height: 7)
                             Text(app.appName)
-                                .font(.caption)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.ink)
                                 .lineLimit(1)
                             Spacer()
                             Text(Format.duration(app.duration))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 11)).numeric()
+                                .foregroundStyle(Theme.ink3)
                         }
                     }
                 }
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .panelSkin()
             }
         }
     }
@@ -99,11 +112,13 @@ struct MenuBarView: View {
                 NSApp.activate()
             } label: {
                 Label("Open Dashboard", systemImage: "rectangle.grid.2x2")
+                    .font(.system(size: 12.5, weight: .semibold))
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .foregroundStyle(Theme.bg)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Theme.accent))
             }
-            .controlSize(.large)
-            .buttonStyle(.borderedProminent)
-            .tint(.indigo)
+            .buttonStyle(.plain)
 
             if state.engine.isPaused {
                 Button {
@@ -113,6 +128,8 @@ struct MenuBarView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
+                .buttonStyle(.bordered)
+                .tint(Theme.accent)
             } else if state.engine.isObserving {
                 HStack(spacing: 8) {
                     Button("Pause 15m") { state.engine.pause(for: 15 * 60) }
@@ -123,6 +140,8 @@ struct MenuBarView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.small)
+                .buttonStyle(.bordered)
+                .tint(Theme.ink2)
             } else {
                 Button {
                     state.engine.start()
@@ -131,35 +150,20 @@ struct MenuBarView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
+                .buttonStyle(.bordered)
+                .tint(Theme.accent)
             }
 
             HStack {
                 Text("No keystrokes · No screenshots")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.ink3)
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .tint(Theme.ink2)
             }
         }
-    }
-}
-
-/// The Availeth logo mark used across the app.
-struct LogoMark: View {
-    var size: CGFloat
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(LinearGradient(
-                colors: [Color(red: 0.42, green: 0.36, blue: 0.98), Color(red: 0.68, green: 0.36, blue: 0.95)],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            ))
-            .overlay {
-                Image(systemName: "sparkles")
-                    .font(.system(size: size * 0.5, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: size, height: size)
     }
 }

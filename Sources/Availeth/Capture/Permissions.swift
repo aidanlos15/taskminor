@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -5,6 +6,20 @@ import Foundation
 /// enrichment capabilities need. Each is separate from Accessibility and from
 /// each other — the user grants only what they turn on.
 enum Permissions {
+
+    /// Relaunches the app. Needed because macOS caches the Screen Recording
+    /// decision at process launch — a grant made in System Settings is real but
+    /// invisible to the running process until it restarts. Spawns a detached
+    /// `open` after a short delay, then terminates cleanly (which saves the
+    /// in-progress span via applicationWillTerminate).
+    static func relaunchApp() {
+        let path = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        task.arguments = ["-c", "sleep 0.8; open \"\(path)\""]
+        try? task.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { NSApp.terminate(nil) }
+    }
 
     // MARK: - Screen Recording (for screenshots)
 

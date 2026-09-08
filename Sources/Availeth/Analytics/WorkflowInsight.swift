@@ -26,31 +26,75 @@ struct WorkflowInsight: Equatable {
         var id: Int
         var app: String
         var detail: String
+        /// A detailed account of what happened AT this step, from the captured
+        /// narratives — so the step map is vivid, not just an app name.
+        var content: String = ""
     }
 }
 
 enum WorkflowInsighter {
 
+    /// Padding around each occurrence window so captures that land just outside
+    /// the tight boundary (the model runs behind) are still attached.
+    private static let windowPad: TimeInterval = 120
+
     static func build(_ pattern: WorkflowPattern, store: Store, demo: Bool) -> WorkflowInsight {
-        let steps = buildSteps(pattern)
+        var steps = buildSteps(pattern)
         let matcher = StepMatcher(steps: steps)
 
-        // For each occurrence window, pull the raw data then keep ONLY what
-        // belongs to this workflow's steps.
+        // Pull all captured data across the workflow's whole (padded) span once,
+        // then keep only what belongs to its steps (by unit).
+        let starts = pattern.windows.map(\.start)
+        let ends = pattern.windows.map(\.end)
+        let spanStart = (starts.min() ?? .distantPast).addingTimeInterval(-windowPad)
+        let spanEnd = (ends.max() ?? Date()).addingTimeInterval(windowPad)
+        let allNarr = store.narratives(from: spanStart, to: spanEnd, demo: demo)
+            .filter { matcher.matches(app: $0.appName, title: $0.windowTitle) }
+            .sorted { $0.timestamp < $1.timestamp }
+        let allSpansMatched = store.spans(from: spanStart, to: spanEnd, demo: demo)
+            .filter { matcher.matches(app: $0.appName, title: $0.windowTitle) }
+
+        // Per occurrence (padded) for spans (automation analysis) and for the
+        // representative walkthrough.
         var occSpans: [[ActivitySpan]] = []
         var occNarr: [[SceneNarrative]] = []
         for w in pattern.windows {
-            let spans = store.spans(from: w.start, to: w.end.addingTimeInterval(1), demo: demo)
-                .filter { matcher.matches(app: $0.appName, title: $0.windowTitle) }
-            let narrs = store.narratives(from: w.start, to: w.end.addingTimeInterval(1), demo: demo)
-                .filter { matcher.matches(app: $0.appName, title: $0.windowTitle) }
-                .sorted { $0.timestamp < $1.timestamp }
-            occSpans.append(spans)
-            occNarr.append(narrs)
+            let a = w.start.addingTimeInterval(-windowPad), b = w.end.addingTimeInterval(windowPad)
+            occSpans.append(allSpansMatched.filter { $0.end > a && $0.start < b })
+            occNarr.append(allNarr.filter { $0.timestamp >= a && $0.timestamp <= b })
         }
-        // Representative run = the occurrence with the most captured moments.
+        // Representative run = the occurrence with the most captured moments. If
+        // nothing landed inside ANY occurrence we leave this empty and show an
+        // honest "no detail yet" state — never dress up content from the gaps
+        // between runs as if it were a real run of this workflow.
         let moments = occNarr.max(by: { $0.count < $1.count }) ?? []
-        let analysis = analyzeAutomation(pattern: pattern, occSpans: occSpans, narratives: occNarr.flatMap { $0 })
+
+        // Content pool for the step map and the cognitive read: ONLY narratives
+        // captured inside the workflow's own occurrences (deduped by id), never
+        // the gaps between them — so unrelated same-unit work (e.g. a personal
+        // spreadsheet opened in Excel between invoice runs) can't leak into a step.
+        var runNarr: [SceneNarrative] = []
+        var seenIDs = Set<Int64>()
+        for occ in occNarr {
+            for n in occ where !seenIDs.contains(n.id) { seenIDs.insert(n.id); runNarr.append(n) }
+        }
+
+        // Per-step detail: the richest in-occurrence narrative for each step's
+        // unit. A unit that recurs at two steps (e.g. Notes → browser → Notes)
+        // gets a DIFFERENT moment at each step (richest-first, no reuse), so the
+        // steps never read as byte-identical.
+        var byUnit: [String: [SceneNarrative]] = [:]
+        for n in runNarr { byUnit[WorkflowUnit.label(app: n.appName, title: n.windowTitle), default: []].append(n) }
+        for k in byUnit.keys { byUnit[k]?.sort { $0.text.count > $1.text.count } }
+        var usedIDs = Set<Int64>()
+        for i in steps.indices {
+            let pool = byUnit[steps[i].app] ?? []
+            let pick = pool.first { !usedIDs.contains($0.id) } ?? pool.first
+            if let pick { usedIDs.insert(pick.id) }
+            steps[i].content = pick?.text ?? ""
+        }
+
+        let analysis = analyzeAutomation(pattern: pattern, occSpans: occSpans, narratives: runNarr)
 
         return WorkflowInsight(
             pattern: pattern,

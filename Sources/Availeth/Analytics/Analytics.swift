@@ -33,6 +33,99 @@ enum Analytics {
         return groups.values.sorted { $0.duration > $1.duration }
     }
 
+    // MARK: - Detailed, content-rich tasks
+
+    /// Like `taskGroups`, but attaches the captured detailed narratives to each
+    /// task and splits generic lumps (e.g. all "Claude" usage) into distinct
+    /// conversations by content, so each row says WHAT the work actually was.
+    static func detailedTasks(_ spans: [ActivitySpan], narratives: [SceneNarrative], calendar: Calendar = .current) -> [DetailedTask] {
+        // 1. Collect spans per task key (unit + normalized title).
+        struct Group { var unit: String; var title: String; var generic: Bool; var spans: [ActivitySpan] }
+        var groups: [String: Group] = [:]
+        for span in spans {
+            let unit = WorkflowUnit.label(app: span.appName, title: span.windowTitle)
+            let title = normalizeTitle(span.windowTitle, appName: span.appName)
+            let key = unit + "\u{1F}" + title
+            // "Generic" = the title says nothing beyond the app/site (e.g. a bare
+            // "Claude" or "ChatGPT" window) → worth splitting into conversations.
+            let generic = title.hasPrefix("General ") || title == unit
+            var g = groups[key] ?? Group(unit: unit, title: title, generic: generic, spans: [])
+            g.spans.append(span)
+            groups[key] = g
+        }
+        // 2. Index narratives by the same key.
+        let sortedNarr = narratives.sorted { $0.timestamp < $1.timestamp }
+        var narrByKey: [String: [SceneNarrative]] = [:]
+        for n in sortedNarr {
+            let key = WorkflowUnit.label(app: n.appName, title: n.windowTitle) + "\u{1F}" + normalizeTitle(n.windowTitle, appName: n.appName)
+            narrByKey[key, default: []].append(n)
+        }
+
+        // 3. Build tasks. Generic groups with content get split into conversations.
+        var out: [DetailedTask] = []
+        for (key, g) in groups {
+            let groupNarr = narrByKey[key] ?? []
+            if g.generic, groupNarr.count > 1 {
+                let sessions = splitSpansByGap(g.spans.sorted { $0.start < $1.start }, gap: 5 * 60)
+                if sessions.count > 1 {
+                    for (i, sess) in sessions.enumerated() {
+                        guard let s0 = sess.first?.start, let s1 = sess.last?.end else { continue }
+                        let moments = groupNarr.filter { $0.timestamp >= s0.addingTimeInterval(-30) && $0.timestamp <= s1.addingTimeInterval(30) }
+                        out.append(makeTask(id: "\(key)#\(i)", unit: g.unit, fallbackTitle: g.title, spans: sess, moments: moments))
+                    }
+                    continue
+                }
+            }
+            out.append(makeTask(id: key, unit: g.unit, fallbackTitle: g.title, spans: g.spans, moments: groupNarr))
+        }
+        return out.sorted { $0.duration > $1.duration }
+    }
+
+    private static func makeTask(id: String, unit: String, fallbackTitle: String, spans: [ActivitySpan], moments raw: [SceneNarrative]) -> DetailedTask {
+        let moments = dedupNarratives(raw.sorted { $0.timestamp < $1.timestamp })
+        let duration = spans.reduce(0) { $0 + $1.duration }
+        let lastSeen = spans.map(\.end).max() ?? Date()
+        // Title: a real window title if we have one; otherwise (bare app/site
+        // name, or "General …") derive a headline from the captured content.
+        let uninformative = fallbackTitle.hasPrefix("General ") || fallbackTitle == unit
+        let title = (uninformative ? taskLabel(from: moments) : nil) ?? fallbackTitle
+        let preview = moments.max(by: { $0.text.count < $1.text.count })?.text ?? ""
+        return DetailedTask(id: id, title: title, appUnit: unit, duration: duration,
+                            sessions: spans.count, lastSeen: lastSeen, moments: moments, preview: preview)
+    }
+
+    /// Splits a time-sorted span list into sessions on gaps larger than `gap`.
+    static func splitSpansByGap(_ spans: [ActivitySpan], gap: TimeInterval) -> [[ActivitySpan]] {
+        var sessions: [[ActivitySpan]] = []
+        var current: [ActivitySpan] = []
+        var lastEnd: Date?
+        for s in spans {
+            if let prev = lastEnd, s.start.timeIntervalSince(prev) > gap {
+                if !current.isEmpty { sessions.append(current); current = [] }
+            }
+            current.append(s)
+            lastEnd = max(lastEnd ?? s.end, s.end)
+        }
+        if !current.isEmpty { sessions.append(current) }
+        return sessions
+    }
+
+    /// A short human label from the content of a conversation's moments.
+    static func taskLabel(from moments: [SceneNarrative]) -> String? {
+        guard let text = moments.max(by: { $0.text.count < $1.text.count })?.text, !text.isEmpty else { return nil }
+        // First sentence, trimmed to a headline length.
+        let firstSentence = text.split(whereSeparator: { ".!?".contains($0) }).first.map(String.init) ?? text
+        var label = firstSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        if label.count > 80 { label = String(label.prefix(80)).trimmingCharacters(in: .whitespaces) + "…" }
+        return label.isEmpty ? nil : label
+    }
+
+    private static func dedupNarratives(_ ns: [SceneNarrative]) -> [SceneNarrative] {
+        var out: [SceneNarrative] = []
+        for n in ns where out.last?.text != n.text { out.append(n) }
+        return out
+    }
+
     /// Splits each span across the hours of the day it touches.
     /// Hour boundaries come from Calendar.dateInterval, which is sub-second-safe
     /// and correct across DST transitions (bySettingHour is neither).

@@ -2,6 +2,11 @@ import AppKit
 import Combine
 import ServiceManagement
 
+/// The app's visual appearance. Light is the default.
+enum ThemeMode: String {
+    case light, dark
+}
+
 /// Central wiring: owns the store and capture engine, exposes query helpers,
 /// and versions the data so views refresh when new spans land.
 final class AppState: ObservableObject {
@@ -23,6 +28,22 @@ final class AppState: ObservableObject {
     /// True → dashboard shows the bundled demo dataset; false → live capture.
     @Published var showDemo: Bool {
         didSet { UserDefaults.standard.set(showDemo, forKey: "availeth.showDemo") }
+    }
+
+    /// The app's visual appearance. Defaults to Light; the user flips it from the
+    /// sidebar footer. Drives NSApp.appearance, which re-resolves every adaptive
+    /// Theme token and the window chrome in one shot.
+    @Published var themeMode: ThemeMode {
+        didSet {
+            UserDefaults.standard.set(themeMode.rawValue, forKey: "availeth.theme")
+            applyAppearance()
+        }
+    }
+
+    /// Applies the selected appearance to the whole app (all windows + adaptive
+    /// colors). Safe to call repeatedly; call once at launch to honor the default.
+    func applyAppearance() {
+        NSApp.appearance = NSAppearance(named: themeMode == .dark ? .darkAqua : .aqua)
     }
 
     /// Loaded labour rate used for $ estimates.
@@ -50,6 +71,9 @@ final class AppState: ObservableObject {
         }
         let rate = defaults.double(forKey: "availeth.hourlyRate")
         hourlyRate = rate > 0 ? rate : 45
+
+        // Default to Light on first launch; honor the saved choice thereafter.
+        themeMode = (defaults.string(forKey: "availeth.theme")).flatMap(ThemeMode.init) ?? .light
 
         engine.onSpanSaved = { [weak self] in
             DispatchQueue.main.async {

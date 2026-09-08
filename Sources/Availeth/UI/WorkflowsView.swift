@@ -30,13 +30,14 @@ struct WorkflowsView: View {
             }
             .padding(20)
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .scrollContentBackground(.hidden)
         .onAppear(perform: reload)
         .onChange(of: range) { reload() }
         .onChange(of: state.showDemo) { reload() }
         .onChange(of: state.dataVersion) { reload() }
         .sheet(item: $selected) { insight in
-            WorkflowDetailView(insight: insight, hourlyRate: state.hourlyRate)
+            WorkflowDetailView(insight: insight, hourlyRate: state.hourlyRate,
+                               storylineOn: state.engine.screenshotMode == .storyline)
         }
     }
 
@@ -72,28 +73,29 @@ struct WorkflowsView: View {
         let totalHours = reliable.reduce(0.0) { $0 + $1.estimatedHoursPerYear }
         return Card {
             HStack(alignment: .center, spacing: 20) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Automation Opportunity Map")
-                        .font(.title2.weight(.bold))
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Theme.ink)
                     Text("Tasks you repeat across apps, found automatically. Click any one to see exactly what you did and what a bot could do instead.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
                 if !reliable.isEmpty {
-                    VStack(alignment: .trailing, spacing: 2) {
+                    VStack(alignment: .trailing, spacing: 3) {
                         Text("~" + Format.money(totalSaving) + " / yr")
-                            .font(.system(size: 26, weight: .bold, design: .rounded))
-                            .foregroundStyle(.purple)
+                            .font(.system(size: 26, weight: .bold)).numeric()
+                            .foregroundStyle(Theme.accent)
                         Text("\(Format.hours(totalHours)) of repetitive work per year")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10.5)).numeric()
+                            .foregroundStyle(Theme.ink3)
                     }
                 } else if !insights.isEmpty {
                     Text("Yearly projections appear\nafter 2+ observed days")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.ink3)
                         .multilineTextAlignment(.trailing)
                 }
             }
@@ -102,8 +104,8 @@ struct WorkflowsView: View {
 
     private var disclaimer: some View {
         Text("Estimates are heuristic ranges extrapolated from the observed window at \(Format.money(state.hourlyRate))/hr. Treat them as directional — a real engagement validates each workflow with the people who run it.")
-            .font(.caption)
-            .foregroundStyle(.tertiary)
+            .font(.system(size: 11)).numeric()
+            .foregroundStyle(Theme.ink3)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 4)
     }
@@ -123,23 +125,23 @@ struct WorkflowCard: View {
                     VStack(alignment: .leading, spacing: 10) {
                         // Plain-language name + what it is.
                         Text(insight.title)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.ink)
                         Text(insight.whatItIs)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Theme.ink2)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
 
                         // What to automate — the point of the whole card.
                         Label {
                             Text(insight.whatToAutomate)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.ink2)
                                 .lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         } icon: {
-                            Image(systemName: "wand.and.stars").foregroundStyle(.purple)
+                            Image(systemName: "wand.and.stars").foregroundStyle(Theme.accent)
                         }
 
                         chain
@@ -153,17 +155,18 @@ struct WorkflowCard: View {
                                 metric(value: "~" + Format.money(pattern.estimatedYearlySaving(hourlyRate: hourlyRate)), label: "potential saving / yr", emphasized: true)
                             } else if !insight.automatable {
                                 Text("Likely needs a person")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Theme.ink2)
                                     .padding(.horizontal, 9).padding(.vertical, 4)
-                                    .background(Capsule().fill(.quaternary.opacity(0.6)))
+                                    .background(Capsule().fill(Theme.panelHi))
+                                    .overlay(Capsule().strokeBorder(Theme.line, lineWidth: 1))
                             } else {
                                 metric(value: "—", label: "est. per year")
                             }
                         }
 
                         Label("Click to see the full breakdown", systemImage: "arrow.up.right.square")
-                            .font(.caption2).foregroundStyle(.indigo)
+                            .font(.system(size: 10.5)).foregroundStyle(Theme.accent)
                     }
                     Spacer()
                     scoreGauge
@@ -181,7 +184,7 @@ struct WorkflowCard: View {
         HStack(spacing: 6) {
             ForEach(Array(pattern.apps.enumerated()), id: \.offset) { index, app in
                 if index > 0 {
-                    Image(systemName: "arrow.right").font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                    Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.ink3)
                 }
                 AppChip(name: app)
             }
@@ -189,36 +192,36 @@ struct WorkflowCard: View {
     }
 
     private func metric(value: String, label: String, emphasized: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(value)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(emphasized ? AnyShapeStyle(Color.purple) : AnyShapeStyle(.primary))
-            Text(label).font(.caption2).foregroundStyle(.secondary)
+                .font(.system(size: 15, weight: .semibold)).numeric()
+                .foregroundStyle(emphasized ? Theme.accent : Theme.ink)
+            Text(label).microLabel()
         }
     }
 
     private var scoreGauge: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 5) {
             Gauge(value: Double(pattern.automationScore), in: 0...100) {
                 EmptyView()
             } currentValueLabel: {
-                Text("\(pattern.automationScore)").font(.system(size: 15, weight: .bold, design: .rounded))
+                Text("\(pattern.automationScore)").font(.system(size: 15, weight: .bold)).numeric()
+                    .foregroundStyle(Theme.ink)
             }
             .gaugeStyle(.accessoryCircularCapacity)
             .tint(scoreColor)
             .scaleEffect(1.05)
-            Text("automation\nscore").font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text("automation\nscore").microLabel().multilineTextAlignment(.center)
         }
         .frame(width: 76)
     }
 
     private var scoreColor: Color {
-        guard insight.automatable else { return .secondary.opacity(0.5) } // not a candidate → muted
+        guard insight.automatable else { return Theme.ink3 } // not a candidate → muted
         switch pattern.automationScore {
-        case 75...: return .green
-        case 50..<75: return .orange
-        default: return .secondary.opacity(0.5)
+        case 75...: return Theme.good
+        case 50..<75: return Theme.amber
+        default: return Theme.ink3
         }
     }
 }

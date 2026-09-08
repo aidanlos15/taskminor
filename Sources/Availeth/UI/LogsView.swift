@@ -38,9 +38,7 @@ struct LogsView: View {
                 }
 
                 Card(title: "Captured records", subtitle: subtitleText) {
-                    TextField("Filter by app, title, or bundle ID…", text: $search)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 340)
+                    searchField
 
                     if filtered.isEmpty {
                         EmptyState(
@@ -57,7 +55,7 @@ struct LogsView: View {
             }
             .padding(20)
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .scrollContentBackground(.hidden)
         .onAppear(perform: reload)
         .onChange(of: range) { reload() }
         .onChange(of: state.showDemo) { reload() }
@@ -71,6 +69,21 @@ struct LogsView: View {
         shots = state.store.screenshots(from: from, to: to, demo: state.showDemo)
         narratives = state.store.narratives(from: from, to: to, demo: state.showDemo)
         idles = state.store.idleSessions(from: from, to: to, demo: state.showDemo)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.ink3)
+            TextField("Filter by app, title, or bundle ID…", text: $search)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(maxWidth: 340)
+        .panelSkin(Theme.panelHi, border: Theme.line, radius: 8)
     }
 
     // MARK: - Storyline
@@ -108,7 +121,9 @@ struct LogsView: View {
                     case .moment(let n): momentRow(n)
                     case .idle(let s): idleRow(s)
                     }
-                    if index < entries.count - 1 { Divider() }
+                    if index < entries.count - 1 {
+                        Rectangle().fill(Theme.line).frame(height: 1)
+                    }
                 }
             }
         }
@@ -117,25 +132,25 @@ struct LogsView: View {
     private func momentRow(_ n: SceneNarrative) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(n.timestamp.formatted(date: .omitted, time: .shortened))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(.caption).numeric()
+                .foregroundStyle(Theme.ink3)
                 .frame(width: 58, alignment: .leading)
             sceneThumbnail(for: n)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Image(systemName: "sparkle").font(.caption2).foregroundStyle(.purple)
+                    Image(systemName: "sparkle").font(.caption2).foregroundStyle(Theme.accent)
                     if !n.trigger.isEmpty {
                         Text(n.trigger)
                             .font(.caption2.weight(.semibold))
                             .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(Capsule().fill(Color.indigo.opacity(0.15)))
-                            .foregroundStyle(.indigo)
+                            .background(Capsule().fill(Theme.accentDim))
+                            .foregroundStyle(Theme.accent)
                     }
-                    Text(n.text).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Text(n.text).font(.callout).foregroundStyle(Theme.ink).fixedSize(horizontal: false, vertical: true)
                 }
                 if !n.appName.isEmpty {
                     Text(n.windowTitle.isEmpty ? n.appName : "\(n.appName) — \(n.windowTitle)")
-                        .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                        .font(.caption2).foregroundStyle(Theme.ink3).lineLimit(1)
                 }
             }
             Spacer(minLength: 0)
@@ -146,20 +161,20 @@ struct LogsView: View {
     private func idleRow(_ s: IdleSession) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Text(s.start.formatted(date: .omitted, time: .shortened))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(.caption).numeric()
+                .foregroundStyle(Theme.ink3)
                 .frame(width: 58, alignment: .leading)
             Image(systemName: "moon.zzz.fill")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.ink3)
                 .frame(width: 132)
             Text("Away from keyboard · \(Format.duration(s.duration))")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
+                .font(.callout.weight(.medium)).numeric()
+                .foregroundStyle(Theme.ink2)
             Spacer(minLength: 0)
         }
         .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.quaternary.opacity(0.25)))
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.panelHi))
     }
 
     @ViewBuilder
@@ -170,15 +185,16 @@ struct LogsView: View {
                 .aspectRatio(contentMode: .fill)
                 .frame(width: 132, height: 82)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.line))
         } else {
             RoundedRectangle(cornerRadius: 6)
-                .fill(.quaternary.opacity(0.4))
+                .fill(Theme.panelHi)
                 .frame(width: 132, height: 82)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.line))
                 .overlay(
                     VStack(spacing: 2) {
-                        Image(systemName: "photo").foregroundStyle(.tertiary)
-                        Text("image expired").font(.system(size: 8)).foregroundStyle(.tertiary)
+                        Image(systemName: "photo").foregroundStyle(Theme.ink3)
+                        Text("image expired").font(.system(size: 8)).foregroundStyle(Theme.ink3)
                     }
                 )
         }
@@ -201,14 +217,14 @@ struct LogsView: View {
                 schemaRow("doc.text.magnifyingglass", "Document (if enabled)", "The name/path of the file open in the window — its identity, never its contents.")
                 schemaRow("tag", "Source flag", "Whether the record belongs to the demo dataset or your live capture. The two are never mixed.")
             }
-            Divider()
+            Rectangle().fill(Theme.line).frame(height: 1)
             Label {
                 Text("Never in any record: the characters you typed, file contents, clipboard, microphone/camera, or anything from excluded apps.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.ink2)
             } icon: {
                 Image(systemName: "lock.shield")
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Theme.good)
             }
         }
     }
@@ -223,10 +239,11 @@ struct LogsView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             thumbnail(for: shot)
                             Text(shot.timestamp.formatted(date: .omitted, time: .shortened))
-                                .font(.caption2.monospacedDigit())
+                                .font(.caption2).numeric()
+                                .foregroundStyle(Theme.ink2)
                             Text(shot.appName)
                                 .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Theme.ink3)
                                 .lineLimit(1)
                         }
                         .frame(width: 200)
@@ -245,12 +262,13 @@ struct LogsView: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 200, height: 125)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.line))
         } else {
             RoundedRectangle(cornerRadius: 8)
-                .fill(.quaternary.opacity(0.4))
+                .fill(Theme.panelHi)
                 .frame(width: 200, height: 125)
-                .overlay(Image(systemName: "photo").foregroundStyle(.tertiary))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.line))
+                .overlay(Image(systemName: "photo").foregroundStyle(Theme.ink3))
         }
     }
 
@@ -258,10 +276,10 @@ struct LogsView: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: icon)
                 .frame(width: 20)
-                .foregroundStyle(.indigo)
+                .foregroundStyle(Theme.ink2)
             VStack(alignment: .leading, spacing: 1) {
-                Text(name).font(.callout.weight(.medium))
-                Text(explanation).font(.caption).foregroundStyle(.secondary)
+                Text(name).font(.callout.weight(.medium)).foregroundStyle(Theme.ink)
+                Text(explanation).font(.caption).foregroundStyle(Theme.ink2)
             }
         }
     }
@@ -284,8 +302,8 @@ struct LogsView: View {
 
             if filtered.count > Self.displayCap {
                 Text("Showing the newest \(Self.displayCap) of \(filtered.count) records — filter to narrow down.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption).numeric()
+                    .foregroundStyle(Theme.ink3)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 10)
             }
@@ -296,11 +314,12 @@ struct LogsView: View {
         let total = spans.reduce(0.0) { $0 + $1.duration }
         return HStack {
             Text(day.formatted(date: .abbreviated, time: .omitted))
-                .font(.subheadline.weight(.semibold))
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Theme.ink)
             Spacer()
             Text("\(spans.count) records · \(Format.duration(total))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption).numeric()
+                .foregroundStyle(Theme.ink3)
         }
         .padding(.top, 12)
         .padding(.bottom, 4)
@@ -309,12 +328,13 @@ struct LogsView: View {
     private func recordRow(_ span: ActivitySpan) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text("\(span.start.formatted(date: .omitted, time: .standard)) → \(span.end.formatted(date: .omitted, time: .standard))")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(.caption).numeric()
+                .foregroundStyle(Theme.ink2)
                 .frame(width: 150, alignment: .leading)
 
             Text(Format.preciseDuration(span.duration))
-                .font(.caption.monospacedDigit())
+                .font(.caption).numeric()
+                .foregroundStyle(Theme.ink)
                 .frame(width: 56, alignment: .trailing)
 
             HStack(spacing: 6) {
@@ -323,6 +343,7 @@ struct LogsView: View {
                     .frame(width: 7, height: 7)
                 Text(span.appName)
                     .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.ink)
                     .lineLimit(1)
             }
             .frame(width: 140, alignment: .leading)
@@ -331,39 +352,40 @@ struct LogsView: View {
                 if span.windowTitle.isEmpty {
                     Text("no title — Accessibility not granted")
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.ink3)
                         .italic()
                 } else {
                     Text(span.windowTitle)
                         .font(.caption)
+                        .foregroundStyle(Theme.ink2)
                         .lineLimit(1)
                 }
                 HStack(spacing: 8) {
                     Text(span.bundleID)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(size: 9)).numeric()
+                        .foregroundStyle(Theme.ink3)
                     if span.keystrokes > 0 || span.clicks > 0 {
                         Label("\(span.keystrokes) keys · \(span.clicks) clicks", systemImage: "keyboard")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 9)).numeric()
+                            .foregroundStyle(Theme.ink2)
                     }
                     if !span.documentPath.isEmpty {
                         Label(URL(fileURLWithPath: span.documentPath).lastPathComponent, systemImage: "doc")
                             .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.ink2)
                             .lineLimit(1)
                     }
                 }
                 if !span.shortcuts.isEmpty {
                     Label(span.shortcuts, systemImage: "command")
                         .font(.system(size: 9))
-                        .foregroundStyle(.indigo)
+                        .foregroundStyle(Theme.ink2)
                         .lineLimit(1)
                 }
                 if !span.fields.isEmpty {
                     Label(span.fields, systemImage: "character.cursor.ibeam")
                         .font(.system(size: 9))
-                        .foregroundStyle(.teal)
+                        .foregroundStyle(Theme.ink2)
                         .lineLimit(1)
                 }
             }

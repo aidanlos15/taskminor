@@ -60,17 +60,20 @@ enum AppPalette {
         let dark: NSColor
     }
 
+    // Dark variants are a cohesive, slightly-desaturated "console" set — they sit
+    // calmly on the near-black canvas and never fight the single blue accent.
+    // (Light variants are retained for completeness though the app runs dark.)
     private static let hues: [Hue] = [
-        Hue(light: NSColor(red: 0.29, green: 0.33, blue: 0.85, alpha: 1), dark: NSColor(red: 0.58, green: 0.63, blue: 1.00, alpha: 1)), // indigo
-        Hue(light: NSColor(red: 0.00, green: 0.48, blue: 0.43, alpha: 1), dark: NSColor(red: 0.38, green: 0.80, blue: 0.72, alpha: 1)), // teal
-        Hue(light: NSColor(red: 0.78, green: 0.38, blue: 0.08, alpha: 1), dark: NSColor(red: 1.00, green: 0.66, blue: 0.36, alpha: 1)), // orange
-        Hue(light: NSColor(red: 0.74, green: 0.18, blue: 0.42, alpha: 1), dark: NSColor(red: 0.96, green: 0.52, blue: 0.68, alpha: 1)), // pink
-        Hue(light: NSColor(red: 0.44, green: 0.30, blue: 0.85, alpha: 1), dark: NSColor(red: 0.72, green: 0.64, blue: 1.00, alpha: 1)), // violet
-        Hue(light: NSColor(red: 0.08, green: 0.44, blue: 0.72, alpha: 1), dark: NSColor(red: 0.46, green: 0.73, blue: 0.98, alpha: 1)), // blue
-        Hue(light: NSColor(red: 0.28, green: 0.52, blue: 0.13, alpha: 1), dark: NSColor(red: 0.66, green: 0.83, blue: 0.42, alpha: 1)), // green
-        Hue(light: NSColor(red: 0.66, green: 0.46, blue: 0.02, alpha: 1), dark: NSColor(red: 0.95, green: 0.78, blue: 0.32, alpha: 1)), // amber
-        Hue(light: NSColor(red: 0.54, green: 0.23, blue: 0.68, alpha: 1), dark: NSColor(red: 0.83, green: 0.59, blue: 0.96, alpha: 1)), // purple
-        Hue(light: NSColor(red: 0.72, green: 0.22, blue: 0.18, alpha: 1), dark: NSColor(red: 0.96, green: 0.56, blue: 0.50, alpha: 1)), // red
+        Hue(light: NSColor(red: 0.29, green: 0.33, blue: 0.85, alpha: 1), dark: NSColor(red: 0.43, green: 0.54, blue: 0.90, alpha: 1)), // blue
+        Hue(light: NSColor(red: 0.00, green: 0.48, blue: 0.43, alpha: 1), dark: NSColor(red: 0.33, green: 0.72, blue: 0.57, alpha: 1)), // green
+        Hue(light: NSColor(red: 0.78, green: 0.38, blue: 0.08, alpha: 1), dark: NSColor(red: 0.85, green: 0.54, blue: 0.36, alpha: 1)), // orange
+        Hue(light: NSColor(red: 0.74, green: 0.18, blue: 0.42, alpha: 1), dark: NSColor(red: 0.78, green: 0.49, blue: 0.73, alpha: 1)), // pink
+        Hue(light: NSColor(red: 0.44, green: 0.30, blue: 0.85, alpha: 1), dark: NSColor(red: 0.56, green: 0.49, blue: 0.88, alpha: 1)), // violet
+        Hue(light: NSColor(red: 0.08, green: 0.44, blue: 0.72, alpha: 1), dark: NSColor(red: 0.40, green: 0.66, blue: 0.90, alpha: 1)), // sky
+        Hue(light: NSColor(red: 0.28, green: 0.52, blue: 0.13, alpha: 1), dark: NSColor(red: 0.55, green: 0.72, blue: 0.42, alpha: 1)), // moss
+        Hue(light: NSColor(red: 0.66, green: 0.46, blue: 0.02, alpha: 1), dark: NSColor(red: 0.88, green: 0.64, blue: 0.30, alpha: 1)), // amber
+        Hue(light: NSColor(red: 0.54, green: 0.23, blue: 0.68, alpha: 1), dark: NSColor(red: 0.69, green: 0.49, blue: 0.84, alpha: 1)), // purple
+        Hue(light: NSColor(red: 0.72, green: 0.22, blue: 0.18, alpha: 1), dark: NSColor(red: 0.87, green: 0.47, blue: 0.42, alpha: 1)), // red
     ]
 
     static func color(for name: String) -> Color {

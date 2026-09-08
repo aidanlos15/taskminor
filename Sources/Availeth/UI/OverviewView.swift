@@ -16,11 +16,11 @@ struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 statRow
 
                 if spans.isEmpty {
-                    Card {
+                    Panel {
                         EmptyState(
                             icon: "binoculars",
                             title: "Nothing observed yet",
@@ -30,23 +30,19 @@ struct OverviewView: View {
                         )
                     }
                 } else {
-                    HStack(alignment: .top, spacing: 16) {
-                        timeByAppCard
-                            .frame(maxWidth: .infinity)
-                        hourlyCard
-                            .frame(maxWidth: .infinity)
+                    HStack(alignment: .top, spacing: 14) {
+                        timeByAppCard.frame(maxWidth: .infinity)
+                        hourlyCard.frame(maxWidth: .infinity)
                     }
-                    HStack(alignment: .top, spacing: 16) {
-                        dailyTrendCard
-                            .frame(maxWidth: .infinity)
-                        topTasksCard
-                            .frame(maxWidth: .infinity)
+                    HStack(alignment: .top, spacing: 14) {
+                        dailyTrendCard.frame(maxWidth: .infinity)
+                        topTasksCard.frame(maxWidth: .infinity)
                     }
                 }
             }
             .padding(20)
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .scrollContentBackground(.hidden)
         .onAppear(perform: reload)
         .onChange(of: range) { reload() }
         .onChange(of: state.showDemo) { reload() }
@@ -70,30 +66,26 @@ struct OverviewView: View {
         let reliable = patterns.filter(\.projectionIsReliable)
         let potential = reliable.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: state.hourlyRate) }
 
-        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 205), spacing: 16)], spacing: 16) {
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 14)], spacing: 14) {
             StatCard(
-                icon: "clock.fill", iconColor: .indigo,
-                value: Format.duration(totalTime),
-                label: "Time observed",
-                detail: rangeLabel
+                icon: "clock", value: Format.duration(totalTime),
+                label: "Time observed", detail: rangeLabel
             )
             StatCard(
-                icon: "square.grid.3x3.fill", iconColor: .teal,
-                value: "\(appTotals.count)",
-                label: "Apps used"
+                icon: "square.grid.3x3", value: "\(appTotals.count)",
+                label: "Applications", detail: "distinct apps used"
             )
             StatCard(
-                icon: "list.bullet.rectangle.fill", iconColor: .orange,
-                value: "\(tasks.count)",
-                label: "Distinct tasks"
+                icon: "checklist", value: "\(tasks.count)",
+                label: "Tasks", detail: "grouped by window"
             )
             StatCard(
-                icon: "wand.and.stars", iconColor: .purple,
+                icon: "sparkles",
                 value: potential > 0 ? "~" + Format.money(potential) : "—",
-                label: "Automation potential / yr",
-                detail: patterns.isEmpty
-                    ? nil
-                    : (potential > 0 ? "\(patterns.count) workflows detected" : "needs 2+ observed days")
+                label: "Automation potential",
+                detail: patterns.isEmpty ? "no workflows yet"
+                    : (potential > 0 ? "\(patterns.count) workflows detected" : "needs 2+ observed days"),
+                accent: potential > 0
             )
         }
     }
@@ -110,56 +102,60 @@ struct OverviewView: View {
 
     private var timeByAppCard: some View {
         let top = Array(appTotals.prefix(8))
-        return Card(title: "Where the time goes", subtitle: "Active time per application") {
+        return Card(title: "Where the time goes", subtitle: "per application") {
             Chart(top) { item in
                 BarMark(
                     x: .value("Hours", item.duration / 3600),
                     y: .value("App", item.appName)
                 )
-                .foregroundStyle(AppPalette.color(for: item.appName).gradient)
-                .cornerRadius(5)
+                .foregroundStyle(AppPalette.color(for: item.appName))
+                .cornerRadius(3)
                 .annotation(position: .trailing, spacing: 6) {
                     Text(Format.duration(item.duration))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 10.5)).numeric()
+                        .foregroundStyle(Theme.ink2)
                 }
             }
             .chartYScale(domain: top.map(\.appName))
             .chartXAxis(.hidden)
             .chartYAxis {
                 AxisMarks { _ in
-                    AxisValueLabel()
+                    AxisValueLabel().foregroundStyle(Theme.ink2)
                 }
             }
-            .frame(height: max(180, CGFloat(top.count) * 34))
+            .frame(height: max(180, CGFloat(top.count) * 32))
         }
     }
 
     private var hourlyCard: some View {
-        // Window derived from the data so night work is never silently dropped.
         let observedHours = hourly.map(\.hour)
         let lower = min(6, observedHours.min() ?? 6)
         let upper = max(21, observedHours.max() ?? 21) + 1
         let apps = Array(Set(hourly.map(\.appName))).sorted()
-        return Card(title: "Activity through the day", subtitle: "Minutes of active work per hour") {
+        return Card(title: "Activity through the day", subtitle: "min / hour") {
             Chart(hourly) { item in
                 BarMark(
                     x: .value("Hour", item.hour),
                     y: .value("Minutes", item.duration / 60)
                 )
                 .foregroundStyle(by: .value("App", item.appName))
-                .cornerRadius(3)
+                .cornerRadius(2)
             }
             .chartForegroundStyleScale(domain: apps, range: apps.map { AppPalette.color(for: $0) })
             .chartXScale(domain: lower...upper)
             .chartXAxis {
                 AxisMarks(values: Array(stride(from: lower, through: upper, by: 3))) { value in
-                    AxisGridLine()
+                    AxisGridLine().foregroundStyle(Theme.line)
                     AxisValueLabel {
-                        if let h = value.as(Int.self) {
-                            Text("\(h):00")
-                        }
+                        if let h = value.as(Int.self) { Text("\(h):00") }
                     }
+                    .foregroundStyle(Theme.ink3)
+                }
+            }
+            .chartYAxis {
+                AxisMarks { _ in
+                    AxisGridLine().foregroundStyle(Theme.line)
+                    AxisValueLabel().foregroundStyle(Theme.ink3)
                 }
             }
             .chartLegend(position: .bottom, spacing: 8)
@@ -168,7 +164,7 @@ struct OverviewView: View {
     }
 
     private var dailyTrendCard: some View {
-        Card(title: "Daily observed time", subtitle: "How much work Availeth saw each day") {
+        Card(title: "Daily observed time", subtitle: "per day") {
             if daily.count <= 1 {
                 EmptyState(icon: "calendar", title: "Not enough days yet", message: "Switch to a longer range to see the trend.")
             } else {
@@ -177,12 +173,20 @@ struct OverviewView: View {
                         x: .value("Day", day.day, unit: .day),
                         y: .value("Hours", day.duration / 3600)
                     )
-                    .foregroundStyle(Color.indigo.gradient)
-                    .cornerRadius(4)
+                    .foregroundStyle(LinearGradient(colors: [Theme.accent, Theme.accent.opacity(0.55)],
+                                                    startPoint: .top, endPoint: .bottom))
+                    .cornerRadius(3)
                 }
                 .chartXAxis {
                     AxisMarks(values: .stride(by: .day)) { _ in
                         AxisValueLabel(format: .dateTime.weekday(.narrow), centered: true)
+                            .foregroundStyle(Theme.ink3)
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks { _ in
+                        AxisGridLine().foregroundStyle(Theme.line)
+                        AxisValueLabel().foregroundStyle(Theme.ink3)
                     }
                 }
                 .frame(height: 200)
@@ -193,28 +197,32 @@ struct OverviewView: View {
     private var topTasksCard: some View {
         let top = Array(tasks.prefix(6))
         let maxDuration = top.first?.duration ?? 1
-        return Card(title: "Top tasks", subtitle: "Grouped by window · full list in the Tasks tab") {
-            VStack(spacing: 10) {
+        return Card(title: "Top tasks", subtitle: "by time") {
+            VStack(spacing: 11) {
                 ForEach(top) { task in
-                    HStack(spacing: 10) {
+                    HStack(spacing: 11) {
                         Circle()
                             .fill(AppPalette.color(for: task.appName))
-                            .frame(width: 8, height: 8)
-                        VStack(alignment: .leading, spacing: 3) {
+                            .frame(width: 7, height: 7)
+                        VStack(alignment: .leading, spacing: 5) {
                             Text(task.title)
-                                .font(.callout)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.ink)
                                 .lineLimit(1)
                             GeometryReader { geo in
-                                RoundedRectangle(cornerRadius: 2)
-                                    .fill(AppPalette.color(for: task.appName).opacity(0.35))
-                                    .frame(width: max(4, geo.size.width * task.duration / maxDuration), height: 4)
+                                ZStack(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 2).fill(Theme.panelHi).frame(height: 3)
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(AppPalette.color(for: task.appName))
+                                        .frame(width: max(4, geo.size.width * task.duration / maxDuration), height: 3)
+                                }
                             }
-                            .frame(height: 4)
+                            .frame(height: 3)
                         }
                         Spacer()
                         Text(Format.duration(task.duration))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 11)).numeric()
+                            .foregroundStyle(Theme.ink3)
                     }
                 }
             }

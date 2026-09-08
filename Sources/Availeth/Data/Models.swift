@@ -223,6 +223,22 @@ struct TaskGroup: Identifiable, Equatable {
     var lastSeen: Date
 }
 
+/// A task enriched with the actual on-screen content captured while it happened
+/// — the detailed narratives (prompts, answers, form values) from the local
+/// vision model, so you can see WHAT the work was, not just its window title.
+struct DetailedTask: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var appUnit: String
+    var duration: TimeInterval
+    var sessions: Int
+    var lastSeen: Date
+    /// Detailed content moments captured during this task, time-ordered.
+    var moments: [SceneNarrative]
+    /// A short snippet for the collapsed row (from the richest moment).
+    var preview: String
+}
+
 /// Time spent per hour-of-day, split by app, for the timeline chart.
 struct HourlyActivity: Identifiable, Equatable {
     var id: String { "\(hour)|\(appName)" }

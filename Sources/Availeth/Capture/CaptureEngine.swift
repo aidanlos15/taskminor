@@ -24,30 +24,24 @@ final class CaptureEngine: ObservableObject {
         didSet { UserDefaults.standard.set(Array(excludedBundleIDs), forKey: Self.exclusionsKey) }
     }
 
-    static let defaultExclusions: Set<String> = [
-        // Password managers
-        "com.1password.1password",
-        "com.agilebits.onepassword7",
-        "com.bitwarden.desktop",
-        "org.keepassxc.keepassxc",
-        "com.dashlane.dashlanephonefinal",
-        "com.lastpass.lastpassmacdesktop",
-        "in.sinew.Enpass-Desktop",
-        "com.apple.Passwords",
-        "com.apple.keychainaccess",
-        // Messaging
-        "com.apple.MobileSMS",            // Messages
-        "net.whatsapp.WhatsApp",
-        "org.whispersystems.signal-desktop",
-        "ru.keepcoder.Telegram",
-        "com.tdesktop.Telegram",
-        "com.hnc.Discord",
-        // System
+    /// Nothing is excluded by default — Availeth records everything unless the
+    /// user explicitly excludes an app in the Privacy tab.
+    static let defaultExclusions: Set<String> = []
+
+    /// The set Availeth used to auto-exclude (password managers, messengers,
+    /// System Settings). Retained only so the version-3 migration can strip them
+    /// from existing installs; user-added exclusions outside this set are kept.
+    private static let legacyDefaultExclusions: Set<String> = [
+        "com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop",
+        "org.keepassxc.keepassxc", "com.dashlane.dashlanephonefinal", "com.lastpass.lastpassmacdesktop",
+        "in.sinew.Enpass-Desktop", "com.apple.Passwords", "com.apple.keychainaccess",
+        "com.apple.MobileSMS", "net.whatsapp.WhatsApp", "org.whispersystems.signal-desktop",
+        "ru.keepcoder.Telegram", "com.tdesktop.Telegram", "com.hnc.Discord",
         "com.apple.systempreferences",
     ]
     private static let exclusionsKey = "availeth.exclusions"
     private static let exclusionsVersionKey = "availeth.exclusionsVersion"
-    private static let exclusionsVersion = 2
+    private static let exclusionsVersion = 3
     private static let observingEnabledKey = "availeth.observingEnabled"
     private static let pausedUntilKey = "availeth.pausedUntil"
 
@@ -67,6 +61,10 @@ final class CaptureEngine: ObservableObject {
     @Published var screenshotMode: ScreenshotMode {
         didSet {
             UserDefaults.standard.set(screenshotMode.rawValue, forKey: "availeth.cap.screenshotMode")
+            // Changing mode invalidates any queued/in-flight storyline work, so it
+            // can't narrate now-stale frames (with old timestamps) after a round-trip.
+            captureEpoch &+= 1
+            pendingFrames.removeAll()
             if screenshotMode == .storyline { refreshInterpreterStatus() }
         }
     }
@@ -83,12 +81,15 @@ final class CaptureEngine: ObservableObject {
 
     /// How long redacted screenshots are kept before automatic deletion.
     var screenshotRetention: TimeInterval = 24 * 3600
-    /// Never capture more often than this, even when the context changes.
-    private let captureFloor: TimeInterval = 8
+    /// Never capture more often than this, even when the context changes. Short
+    /// for storyline (frame grab is cheap and queued) so fast app-switches in a
+    /// workflow — e.g. Notes ⇄ a browser tab — are all captured.
+    private func captureFloor() -> TimeInterval { screenshotMode == .storyline ? 3 : 8 }
     /// Safety-net interval: capture at least this often on a static-but-active
-    /// screen. Actions and context changes are the primary triggers, so this can
-    /// be long.
-    private func captureInterval() -> TimeInterval { screenshotMode == .storyline ? 60 : 120 }
+    /// screen. Shorter for storyline so a single-window conversation (e.g. a
+    /// Claude/ChatGPT thread, where the title never changes) is sampled often
+    /// enough to catch both the prompt and the answer.
+    private func captureInterval() -> TimeInterval { screenshotMode == .storyline ? 25 : 120 }
     private var lastScreenshotDate = Date.distantPast
     /// bundleID|normalized-title of the last captured frame, for change detection.
     private var lastCaptureContext = ""
@@ -114,9 +115,25 @@ final class CaptureEngine: ObservableObject {
     /// Identifies each capture; a late/abandoned op with a stale generation may
     /// neither store its result nor clear captureInFlight.
     private var captureGeneration = 0
+    /// Bumped whenever the storyline capture context is invalidated (stop, suspend,
+    /// pause, or a mode change). A grab or narration that started under an older
+    /// epoch must not enqueue or store — this is what the thumbnail path gets from
+    /// the generation token, which storyline can't reuse (it bumps per grab).
+    private var captureEpoch = 0
     /// Wall-clock ceiling after which captureInFlight is force-freed even if the
     /// underlying ScreenCaptureKit / model call has hung.
     private let maxCaptureBudget: TimeInterval = 60
+
+    // Storyline decouples the FAST frame grab (~100ms) from the SLOW narration
+    // (~15-20s), so no context switch is dropped while the model is thinking.
+    private struct PendingFrame {
+        let png: Data; let appName: String; let title: String
+        let reason: String; let timestamp: Date; let depth: CaptureDepth
+    }
+    private var pendingFrames: [PendingFrame] = []   // main-actor only
+    private let maxPendingFrames = 8                  // keep most-recent, bound memory
+    private var grabbingFrame = false                 // one screen-grab at a time
+    private var narrating = false                     // one narration at a time
 
     var sceneInterpreterName: String { interpreter.displayName }
     var onScreenshotSaved: (() -> Void)?
@@ -168,15 +185,21 @@ final class CaptureEngine: ObservableObject {
         fileTrackingEnabled = defaults.bool(forKey: "availeth.cap.files")
         captureDepth = defaults.string(forKey: "availeth.cap.depth").flatMap(CaptureDepth.init) ?? .detailed
 
-        // Exclusions, with a version migration that unions in newly added defaults.
+        // Exclusions: nothing is excluded by default now. The version-3 migration
+        // strips the apps Availeth used to auto-exclude from existing installs,
+        // while keeping any the user added themselves.
         if var saved = defaults.stringArray(forKey: Self.exclusionsKey).map(Set.init) {
-            if defaults.integer(forKey: Self.exclusionsVersionKey) < Self.exclusionsVersion {
-                saved.formUnion(Self.defaultExclusions)
+            if defaults.integer(forKey: Self.exclusionsVersionKey) < 3 {
+                saved.subtract(Self.legacyDefaultExclusions)
             }
             excludedBundleIDs = saved
         } else {
             excludedBundleIDs = Self.defaultExclusions
         }
+        // `didSet` doesn't fire for init assignments, so persist the resolved set
+        // explicitly — otherwise a migrated (stripped) list would revert on the
+        // next launch, re-adding the apps we just removed.
+        defaults.set(Array(excludedBundleIDs), forKey: Self.exclusionsKey)
         defaults.set(Self.exclusionsVersion, forKey: Self.exclusionsVersionKey)
 
         // Restore a still-active pause across launches.
@@ -245,7 +268,14 @@ final class CaptureEngine: ObservableObject {
         // Invalidate any in-flight capture so its late completion can neither
         // store a frame nor race a capture started after a restart.
         captureGeneration &+= 1
+        captureEpoch &+= 1
         captureInFlight = false
+        // A grab in flight now has a stale generation (bumped above), so neither it
+        // nor its watchdog will clear this flag — reset it here so a restart begins
+        // clean. (An in-flight narration is left to finish and reset itself; its
+        // stale epoch prevents it storing anything.)
+        grabbingFrame = false
+        pendingFrames.removeAll()
         setCurrentAppName(nil)
     }
 
@@ -322,8 +352,10 @@ final class CaptureEngine: ObservableObject {
 
     private func suspendCapture() {
         suspended = true
+        captureEpoch &+= 1 // invalidate any in-flight grab/narration from before the suspend
         finalizeIdleSessionIfNeeded(returnedAt: Date())
         closeOpenSpan()
+        pendingFrames.removeAll() // drop un-narrated frames captured before sleep/switch
         inputMonitor.setCounting(false)
         syncInputMonitor() // tears the monitor down while suspended
         setCurrentAppName(nil)
@@ -367,7 +399,9 @@ final class CaptureEngine: ObservableObject {
     private func setPause(until: Date) {
         pausedUntil = until
         UserDefaults.standard.set(until.timeIntervalSince1970, forKey: Self.pausedUntilKey)
+        captureEpoch &+= 1 // invalidate any in-flight grab/narration from before the pause
         closeOpenSpan()
+        pendingFrames.removeAll() // don't narrate frames captured just before pausing
         inputMonitor.setCounting(false)
         syncInputMonitor() // stops input monitoring for the pause window
         setCurrentAppName(nil)
@@ -526,10 +560,13 @@ final class CaptureEngine: ObservableObject {
     /// Tick-driven capture: on a context change (new app/window/tab) or the
     /// long interval fallback, but only while the user is present.
     private func maybeCaptureScreenshot(now: Date, frontBundleID: String, appName: String, title: String) {
-        guard screenshotMode != .off, !captureInFlight,
+        guard screenshotMode != .off,
               Permissions.screenRecordingGranted,
               !excludedBundleIDs.contains(frontBundleID) else { return }
-        if screenshotMode == .storyline && !interpreterReady { return }
+        // Thumbnails hold captureInFlight through their (short) op; storyline
+        // holds only grabbingFrame during the fast grab, so it doesn't block.
+        if screenshotMode == .thumbnails && captureInFlight { return }
+        if screenshotMode == .storyline && (grabbingFrame || !interpreterReady) { return }
 
         let context = frontBundleID + "|" + Analytics.normalizeTitle(title, appName: appName)
         let contextChanged = context != lastCaptureContext
@@ -538,7 +575,7 @@ final class CaptureEngine: ObservableObject {
             lastCaptureDate: lastScreenshotDate,
             lastContext: lastCaptureContext,
             currentContext: context,
-            floor: captureFloor,
+            floor: captureFloor(),
             interval: captureInterval(),
             idleSeconds: systemIdleSeconds()
         ) else { return }
@@ -560,17 +597,19 @@ final class CaptureEngine: ObservableObject {
         pendingActionCapture?.cancel()
         let sinceLast = Date().timeIntervalSince(lastScreenshotDate)
         // Small settle delay so the screen reflects the action; never below the floor.
-        let delay = max(0.4, captureFloor - sinceLast)
+        let delay = max(0.4, captureFloor() - sinceLast)
         let work = DispatchWorkItem { [weak self] in self?.fireActionCapture() }
         pendingActionCapture = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func fireActionCapture() {
-        guard isObserving, !suspended, !isPaused, !captureInFlight,
+        guard isObserving, !suspended, !isPaused,
               screenshotMode != .off, Permissions.screenRecordingGranted,
+              !(screenshotMode == .thumbnails && captureInFlight),
+              !(screenshotMode == .storyline && grabbingFrame),
               systemIdleSeconds() < idleThreshold,
-              Date().timeIntervalSince(lastScreenshotDate) >= captureFloor,
+              Date().timeIntervalSince(lastScreenshotDate) >= captureFloor(),
               let front = NSWorkspace.shared.frontmostApplication,
               let bundleID = front.bundleIdentifier,
               bundleID != Bundle.main.bundleIdentifier,
@@ -595,28 +634,95 @@ final class CaptureEngine: ObservableObject {
     /// ensures a late/abandoned op can never store its result or clear a newer
     /// capture's flag.
     private func beginCapture(now: Date, frontBundleID: String, appName: String, title: String, context: String, reason: String) {
-        guard !captureInFlight else { return }
-        captureGeneration &+= 1
-        let gen = captureGeneration
         lastScreenshotDate = now
         lastCaptureContext = context
-        captureInFlight = true
-        let mode = screenshotMode
         let excluded = excludedBundleIDs
 
-        // Watchdog: free the flag by wall-clock regardless of the op.
-        DispatchQueue.main.asyncAfter(deadline: .now() + maxCaptureBudget) { [weak self] in
-            guard let self, self.captureGeneration == gen, self.captureInFlight else { return }
-            self.captureInFlight = false
+        if screenshotMode == .thumbnails {
+            guard !captureInFlight else { return }
+            captureGeneration &+= 1
+            let gen = captureGeneration
+            captureInFlight = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + maxCaptureBudget) { [weak self] in
+                guard let self, self.captureGeneration == gen, self.captureInFlight else { return }
+                self.captureInFlight = false
+            }
+            Task { [weak self] in
+                guard let self else { return }
+                _ = await self.runThumbnailCapture(now: now, appName: appName, title: title, excluded: excluded, generation: gen)
+                await MainActor.run { if self.captureGeneration == gen { self.captureInFlight = false } }
+            }
+            return
         }
+
+        // Storyline: grab the frame NOW (fast), enqueue it, and let the narration
+        // worker catch up — so a slow model never causes a missed capture.
+        guard !grabbingFrame else { return }
+        // Same generation-token watchdog the thumbnail path uses: if the grab's
+        // ScreenCaptureKit call HANGS (a real macOS failure mode a structured
+        // timeout can't bound), grabbingFrame would otherwise stay true forever and
+        // silently kill storyline capture for the whole session. Free it after the
+        // budget if the same grab is still outstanding.
+        captureGeneration &+= 1
+        let gen = captureGeneration
+        let epoch = captureEpoch
+        grabbingFrame = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + maxCaptureBudget) { [weak self] in
+            guard let self, self.captureGeneration == gen, self.grabbingFrame else { return }
+            self.grabbingFrame = false // grab hung past budget — recover
+        }
+        let depth = captureDepth
         Task { [weak self] in
             guard let self else { return }
-            if mode == .thumbnails {
-                _ = await self.runThumbnailCapture(now: now, appName: appName, title: title, excluded: excluded, generation: gen)
-            } else {
-                _ = await self.runStorylineCapture(now: now, appName: appName, title: title, excluded: excluded, reason: reason, generation: gen)
+            let cg = await self.screenshotCapture.captureDisplay(excludedBundleIDs: excluded)
+            let png = cg.flatMap { self.screenshotCapture.encodeForModel($0) }
+            await MainActor.run {
+                guard self.captureGeneration == gen else { return } // watchdog/stop superseded us
+                self.grabbingFrame = false
+                guard self.captureEpoch == epoch,           // not invalidated mid-grab
+                      let png,
+                      self.isObserving, !self.isPaused, !self.suspended,
+                      self.screenshotMode == .storyline, !self.frontmostIsExcluded() else { return }
+                self.pendingFrames.append(PendingFrame(png: png, appName: appName, title: title, reason: reason, timestamp: now, depth: depth))
+                if self.pendingFrames.count > self.maxPendingFrames {
+                    self.pendingFrames.removeFirst(self.pendingFrames.count - self.maxPendingFrames)
+                }
+                self.drainNarration()
             }
-            await MainActor.run { if self.captureGeneration == gen { self.captureInFlight = false } }
+        }
+    }
+
+    /// Serially narrates queued frames. Frames are captured immediately; this
+    /// catches up at the model's pace without ever blocking a capture.
+    private func drainNarration() {
+        guard !narrating, interpreterReady, screenshotMode == .storyline,
+              !pendingFrames.isEmpty else { return }
+        narrating = true
+        let epoch = captureEpoch
+        let frame = pendingFrames.removeFirst()
+        Task { [weak self] in
+            guard let self else { return }
+            let narrative = await self.interpreter.narrate(
+                pngData: frame.png,
+                context: SceneContext(appName: frame.appName, windowTitle: frame.title, action: frame.reason, depth: frame.depth))
+            await MainActor.run {
+                if let narrative {
+                    // Epoch guard: a stop/suspend/pause/mode-change during the
+                    // ~15-20s narration invalidates this frame — don't store it.
+                    if self.captureEpoch == epoch && self.isObserving && !self.isPaused && !self.suspended && self.screenshotMode == .storyline {
+                        let url = self.screenshotCapture.writeReviewImage(frame.png)
+                        self.store.insertNarrative(SceneNarrative(
+                            timestamp: frame.timestamp, appName: frame.appName, windowTitle: frame.title,
+                            text: narrative, imagePath: url?.path ?? "", trigger: frame.reason, isDemo: false))
+                        self.onScreenshotSaved?()
+                        self.pruneOldNarratives()
+                    }
+                } else {
+                    self.interpreterReady = false // model went away; keep queued frames for retry
+                }
+                self.narrating = false
+                self.drainNarration()
+            }
         }
     }
 
@@ -650,31 +756,6 @@ final class CaptureEngine: ObservableObject {
 
     /// Storyline: capture → local model narrates → store text → discard image.
     /// The PNG never touches disk; it lives only for the duration of the call.
-    private func runStorylineCapture(now: Date, appName: String, title: String, excluded: Set<String>, reason: String, generation: Int) async -> Bool {
-        guard let cgImage = await screenshotCapture.captureDisplay(excludedBundleIDs: excluded),
-              let png = screenshotCapture.encodeForModel(cgImage) else { return false }
-        let narrative = await interpreter.narrate(pngData: png, context: SceneContext(appName: appName, windowTitle: title, action: reason, depth: captureDepth))
-        guard let narrative else {
-            await MainActor.run { self.interpreterReady = false } // model went away
-            return false
-        }
-        // Keep the frame for review, tied to its narrative (retention-limited).
-        let imageURL = screenshotCapture.writeReviewImage(png)
-        return await MainActor.run {
-            guard self.stillCapturing(.storyline, generation: generation, frontExcluded: self.frontmostIsExcluded()) else {
-                if let imageURL { ScreenshotCapture.deleteFiles([imageURL.path]) }
-                return false
-            }
-            self.store.insertNarrative(SceneNarrative(
-                timestamp: now, appName: appName, windowTitle: title,
-                text: narrative, imagePath: imageURL?.path ?? "", trigger: reason, isDemo: false
-            ))
-            self.onScreenshotSaved?()
-            self.pruneOldNarratives()
-            return true
-        }
-    }
-
     private func pruneOldNarratives() {
         let cutoff = Date().addingTimeInterval(-screenshotRetention)
         let paths = store.pruneNarratives(olderThan: cutoff)
@@ -699,7 +780,10 @@ final class CaptureEngine: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             let ready = await self.interpreter.isAvailable()
-            await MainActor.run { self.interpreterReady = ready }
+            await MainActor.run {
+                self.interpreterReady = ready
+                if ready { self.drainNarration() } // model came back — process queued frames
+            }
         }
     }
 

@@ -71,6 +71,55 @@ final class WorkflowInsightTests: XCTestCase {
         XCTAssertTrue(insight.automatable)
     }
 
+    /// Per-step detail must come ONLY from inside the workflow's own occurrences.
+    /// Same-unit activity in the GAP between runs (a personal Excel sheet opened
+    /// between invoice runs) must never leak into a step's account.
+    func testStepContentExcludesGapContent() {
+        let store = Store.inMemory()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        store.insertBatch(invoiceRunSpans(now: now))
+        // In-run Excel narrative (belongs to the Excel step; Excel span is 35–75s).
+        store.insertNarrative(SceneNarrative(timestamp: now.addingTimeInterval(50), appName: "Microsoft Excel", windowTitle: "Purchase Orders.xlsx", text: "Copying invoice totals from the purchase orders sheet."))
+        // GAP Excel narrative — same unit (Excel) but at now+300, well outside
+        // every occurrence's padded window (runs at 0/600/1200/1800). Must NOT show.
+        store.insertNarrative(SceneNarrative(timestamp: now.addingTimeInterval(300), appName: "Microsoft Excel", windowTitle: "Household Budget.xlsx", text: "Reviewing a personal household budget spreadsheet unrelated to work."))
+
+        let pattern = PatternMiner.mine(spans: store.spans(from: .distantPast, to: .distantFuture, demo: false)).first { $0.apps.contains("NetSuite") && $0.apps.contains("Excel") }
+        XCTAssertNotNil(pattern)
+        let insight = WorkflowInsighter.build(pattern!, store: store, demo: false)
+        let allContent = insight.steps.map(\.content).joined(separator: " ").lowercased()
+        XCTAssertFalse(allContent.contains("household budget"), "gap content leaked into a step: \(allContent)")
+        XCTAssertTrue(allContent.contains("purchase orders sheet") || allContent.contains("invoice totals"), "in-run Excel content missing: \(allContent)")
+    }
+
+    /// A repeated 3-step invoice run (Mail → Excel → NetSuite), 600s apart.
+    private func invoiceRunSpans(now: Date) -> [ActivitySpan] {
+        (0..<4).flatMap { i -> [ActivitySpan] in
+            let base = now.addingTimeInterval(Double(i) * 600)
+            return [
+                ActivitySpan(bundleID: "com.apple.mail", appName: "Mail", windowTitle: "Invoice #\(i)", start: base, end: base.addingTimeInterval(30)),
+                ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel", windowTitle: "Purchase Orders.xlsx", start: base.addingTimeInterval(35), end: base.addingTimeInterval(75), shortcuts: "⌘C×1"),
+                ActivitySpan(bundleID: "com.google.Chrome", appName: "Google Chrome", windowTitle: "Vendor Bills — NetSuite", start: base.addingTimeInterval(80), end: base.addingTimeInterval(125), shortcuts: "⌘V×1"),
+            ]
+        }
+    }
+
+    /// When no capture landed inside ANY occurrence, the walkthrough stays empty
+    /// (honest) rather than back-filling unrelated content from the gaps and
+    /// labelling it "one real run".
+    func testNoMomentsWhenCapturesFallOutsideOccurrences() {
+        let store = Store.inMemory()
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        store.insertBatch(invoiceRunSpans(now: now))
+        // The only narrative matches a step unit (NetSuite) but sits in a gap.
+        store.insertNarrative(SceneNarrative(timestamp: now.addingTimeInterval(300), appName: "Google Chrome", windowTitle: "Vendor Bills — NetSuite", text: "A NetSuite page open outside any run."))
+
+        let pattern = PatternMiner.mine(spans: store.spans(from: .distantPast, to: .distantFuture, demo: false)).first { $0.apps.contains("NetSuite") && $0.apps.contains("Excel") }
+        XCTAssertNotNil(pattern)
+        let insight = WorkflowInsighter.build(pattern!, store: store, demo: false)
+        XCTAssertTrue(insight.moments.isEmpty, "gap content was back-filled as a fake 'real run'")
+    }
+
     // MARK: - Automatability judgement
 
     /// Junk UI text is NOT treated as a field the user fills.
