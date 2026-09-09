@@ -125,6 +125,17 @@ scripts/make_signing_identity.sh  creates the stable self-signed identity (run o
 scripts/build_app.sh              builds, signs and installs Availeth.app
 ```
 
+## How the story is written
+
+Capture records windows, typing, fields and data movements. Every minute
+gets one true line built from that record; the local model never writes a
+minute. A job runs until it ends: an idle gap, the safety ceiling, or the
+point where the apps in use turn over and the model, shown the job so far
+and the minutes that follow, answers NEW rather than SAME. Only then does
+the model write the job's account and title, from the whole record, and
+its output is kept only if every name and number in it comes from that
+record.
+
 ## Notes
 
 - Self-signed for local use. Distribution needs a Developer ID certificate,

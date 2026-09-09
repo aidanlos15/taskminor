@@ -321,3 +321,55 @@ final class OnboardingGateTests: XCTestCase {
         XCTAssertTrue(shouldMarkOnboarded(ax: false, screen: false, input: true))
     }
 }
+
+/// The model, not a clock, says where a job ends: at each point where the apps
+/// turn over the grouping stops and asks; its answer is honoured over the rule.
+final class BoundaryJudgeTests: XCTestCase {
+    private let base = Date(timeIntervalSince1970: 1_700_000_000)
+    private func minute(_ i: Int, apps: String, text: String = "work") -> MinuteSummary {
+        MinuteSummary(minuteStart: base.addingTimeInterval(Double(i) * 60), text: text, apps: apps, keystrokes: 40, clicks: 3, shortcuts: "", fields: "", sourceCount: 0)
+    }
+    private var mins: [MinuteSummary] {
+        (0..<3).map { minute($0, apps: "Microsoft Excel — PO.xlsx, Google Chrome — Vendor Bills") }
+            + (3..<6).map { minute($0, apps: "Microsoft Word — Site safety plan.docx", text: "Typed at length in Microsoft Word (Site safety plan.docx).") }
+    }
+    private var cfg: Synthesizer.Config { var c = Synthesizer.Config(); c.taskGraceSeconds = 0; return c }
+
+    func testTurnoverBecomesAQuestionWhenAJudgeIsPresent() {
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [:], askJudge: true)
+        XCTAssertNotNil(r.query)
+        XCTAssertEqual(r.query?.key, Synthesizer.boundaryKey(mins[3]))
+        XCTAssertEqual(r.query?.episode.count, 3)
+        XCTAssertEqual(r.query?.next.count, 3)
+        XCTAssertTrue(r.query?.ruleSaysNew ?? false, "the change holds for the next minute, so the rule alone would split")
+    }
+
+    func testJudgeSayingSameKeepsOneJob() {
+        let key = Synthesizer.boundaryKey(mins[3])
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [key: false], askJudge: true)
+        XCTAssertNil(r.query)
+        XCTAssertEqual(r.closed.count, 1)
+        XCTAssertEqual(r.closed.first?.count, 6)
+    }
+
+    func testJudgeSayingNewSplitsThere() {
+        let key = Synthesizer.boundaryKey(mins[3])
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [key: true], askJudge: true)
+        XCTAssertEqual(r.closed.map(\.count), [3, 3])
+    }
+
+    func testWithoutAJudgeTheRuleDecides() {
+        let (closed, _) = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg)
+        XCTAssertEqual(closed.map(\.count), [3, 3])
+    }
+
+    func testBoundaryPromptIsShortAndParses() {
+        let p = StoryWriter.boundaryPrompt(episode: Array(mins.prefix(3)), next: Array(mins.suffix(3)))
+        XCTAssertTrue(p.contains("Job so far: a couple of minutes"), p)
+        XCTAssertTrue(p.contains("Then: Typed at length in Microsoft Word"), p)
+        XCTAssertLessThan(p.count, 2200, "the question must stay cheap enough to ask at every turnover")
+        XCTAssertEqual(StoryWriter.parseBoundary(" New\n"), true)
+        XCTAssertEqual(StoryWriter.parseBoundary("SAME."), false)
+        XCTAssertNil(StoryWriter.parseBoundary("Probably"))
+    }
+}

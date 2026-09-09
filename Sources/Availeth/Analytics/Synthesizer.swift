@@ -13,10 +13,13 @@ final class Synthesizer {
         /// typing only) and never reach the model, so a run of thirty costs a
         /// few seconds; only minutes with fields, moved data or screen notes
         /// wait on the model.
-        var maxMinutesPerRun = 30
+        var maxMinutesPerRun = 60
         var taskGapSeconds: TimeInterval = 5 * 60
         /// Hard ceiling so one unbroken sitting is not a single enormous card.
-        var maxTaskMinutes = 45
+        /// The model decides where a job ends; this only catches a runaway.
+        var maxTaskMinutes = 90
+        /// How many times per run the model is asked "same job or new?".
+        var maxBoundaryQuestionsPerRun = 8
         /// A task must run this long before a context change can end it.
         var minTaskMinutes = 3
         /// Split when the apps in use turn over completely and stay turned over.
@@ -60,11 +63,11 @@ final class Synthesizer {
         defer { isRunning = false }
 
         let modelReady = await interpreter.isTextAvailable()
-        await synthesizeMinutes(now: now, modelReady: modelReady)
+        await synthesizeMinutes(now: now)
         await groupTasks(now: now, modelReady: modelReady)
     }
 
-    private func synthesizeMinutes(now: Date, modelReady: Bool) async {
+    private func synthesizeMinutes(now: Date) async {
         let currentMinute = Self.floorToMinute(now)
         // Resume from the durable store, not a separate watermark that could
         // rewind on a crash. First run: only the recent window.
@@ -99,20 +102,12 @@ final class Synthesizer {
                     // Settled immediately (task_id = -1) so it never groups into a
                     // task and never re-fetches as ungrouped.
                     store.insertMinuteSummary(ctx.summary(text: "Away from keyboard", taskID: -1))
-                } else if ctx.record.isThin || !modelReady {
-                    // Windows and typing only: a line built from the record says
-                    // all there is to say, and a model asked for more invents it.
-                    // The same line stands in when there is no model, so the
-                    // minute isn't lost or endlessly retried (the UNIQUE index
-                    // prevents dupes).
-                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(ctx.fallbackText)))
                 } else {
-                    // The model's entry is kept only when every name and number
-                    // in it comes from the record; otherwise the record's own line.
-                    let raw = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 140, stop: StoryWriter.minuteStops)
-                    // Both paths are scrubbed the same way, so an address in a
-                    // window title reads as [email] whichever line was kept.
-                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(StoryWriter.acceptEntry(raw, record: ctx.record) ?? ctx.fallbackText)))
+                    // A minute is a record, not a story: one true line built from
+                    // it (windows, typing, fields, data moved). The model is not
+                    // asked about minutes at all; it writes once a job has ended,
+                    // and it is the one that says when that is.
+                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(ctx.fallbackText)))
                 }
             } else {
                 // No activity this minute — record a settled placeholder so the
@@ -129,7 +124,22 @@ final class Synthesizer {
         // returns real ungrouped work minutes.
         let minutes = store.ungroupedMinuteSummaries(demo: false)
         guard !minutes.isEmpty else { return }
-        let (closed, _) = Self.groupMinutes(minutes, now: now, config: config)
+        // The model decides where a job ends. At each point where the apps in
+        // use turn over it is shown the job so far and the minutes that follow
+        // and asked whether the same job continues. With no model, or no usable
+        // answer, a change that holds for the next minute ends the job.
+        var decisions: [Int64: Bool] = [:]
+        var grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+        var asked = 0
+        while let q = grouped.query, asked < config.maxBoundaryQuestionsPerRun {
+            asked += 1
+            decisions[q.key] = await judgeBoundary(q) ?? q.ruleSaysNew
+            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+        }
+        if grouped.query != nil {
+            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: false)
+        }
+        let closed = grouped.closed
         for group in closed {
             if Self.isTrivial(group) {
                 // Settle isolated noise (a single low-activity minute) without
@@ -140,6 +150,14 @@ final class Synthesizer {
             guard let task = await makeTask(from: group, modelReady: modelReady) else { continue }
             store.insertTaskAndLink(task, minuteIDs: group.map(\.id))
         }
+    }
+
+    /// Asks the model whether the job changed at a turnover point. nil when it
+    /// gives no usable answer, so the caller falls back to the rule.
+    private func judgeBoundary(_ q: BoundaryQuery) async -> Bool? {
+        let prompt = StoryWriter.boundaryPrompt(episode: q.episode, next: q.next)
+        guard let raw = await interpreter.summarize(prompt: prompt, maxTokens: 6, stop: ["\n"]) else { return nil }
+        return StoryWriter.parseBoundary(raw)
     }
 
     /// A closed group that isn't worth a task card: a single minute with little
@@ -272,14 +290,32 @@ final class Synthesizer {
 
     /// Groups consecutive same-task minutes. Returns closed groups (ready to
     /// summarize) and the trailing pending run (too recent to close yet).
+    /// A point where the apps in use turned over. The model is asked whether
+    /// the job changed there; `ruleSaysNew` is what the persistence rule would
+    /// decide on its own, used when there is no model or no usable answer.
+    struct BoundaryQuery: Equatable {
+        var key: Int64
+        var episode: [MinuteSummary]
+        var next: [MinuteSummary]
+        var ruleSaysNew: Bool
+    }
+
+    static func boundaryKey(_ m: MinuteSummary) -> Int64 { Int64(m.minuteStart.timeIntervalSince1970) }
+
+    /// Rules only: an idle gap, the ceiling, or a change of apps that holds.
     static func groupMinutes(_ minutes: [MinuteSummary], now: Date, config: Config) -> (closed: [[MinuteSummary]], pending: [MinuteSummary]) {
-        // A task ends at an idle gap, or when the set of apps in use turns over
-        // and STAYS turned over for two minutes — not on a fixed clock. Splitting
-        // every ten minutes produced "Code workflow" cards that were really time
-        // buckets: the same afternoon chopped into equal slices and each one named
-        // after whichever app happened to dominate it. Splitting on a single
-        // minute's app change would shred genuine cross-app workflows, so the
-        // change has to persist before it counts as a new task.
+        let r = groupMinutes(minutes, now: now, config: config, decisions: [:], askJudge: false)
+        return (r.closed, r.pending)
+    }
+
+    /// A task ends at an idle gap, at the ceiling, or where the model says the
+    /// job changed. Splitting on a fixed clock produced "Code workflow" cards
+    /// that were really time buckets, and splitting on any single minute's app
+    /// change shreds genuine cross-app work, so a turnover is a question, not
+    /// an answer: with `askJudge` the walk stops at the first undecided turnover
+    /// and returns it as `query`; the caller decides and calls again. Without a
+    /// judge, a change that holds for the next minute too ends the job.
+    static func groupMinutes(_ minutes: [MinuteSummary], now: Date, config: Config, decisions: [Int64: Bool], askJudge: Bool) -> (closed: [[MinuteSummary]], pending: [MinuteSummary], query: BoundaryQuery?) {
         let sorted = minutes.sorted { $0.minuteStart < $1.minuteStart }
         var groups: [[MinuteSummary]] = []
         var current: [MinuteSummary] = []
@@ -297,17 +333,22 @@ final class Synthesizer {
             let gap = m.minuteStart.timeIntervalSince(prev.minuteStart.addingTimeInterval(60))
             let tooLong = current.count >= config.maxTaskMinutes
 
-            // Turnover: nothing this minute overlaps what the task has been doing.
+            // Turnover: nothing this minute overlaps what the job has been doing.
             var turnedOver = false
-            if !config.splitOnContextChange {
-                turnedOver = false
-            } else if current.count >= config.minTaskMinutes {
+            if config.splitOnContextChange && current.count >= config.minTaskMinutes {
                 let running = current.suffix(3).reduce(into: Set<String>()) { $0.formUnion(appSet($1)) }
-                let now = appSet(m)
-                if !now.isEmpty && !running.isEmpty && now.isDisjoint(with: running) {
-                    // Only a change that holds for the next minute too.
-                    let next = i + 1 < sorted.count ? appSet(sorted[i + 1]) : now
-                    turnedOver = next.isEmpty || !next.isDisjoint(with: now)
+                let here = appSet(m)
+                if !here.isEmpty && !running.isEmpty && here.isDisjoint(with: running) {
+                    let next = i + 1 < sorted.count ? appSet(sorted[i + 1]) : here
+                    let ruleSaysNew = next.isEmpty || !next.isDisjoint(with: here)
+                    if let decided = decisions[boundaryKey(m)] {
+                        turnedOver = decided
+                    } else if askJudge {
+                        let following = Array(sorted[i..<min(i + 3, sorted.count)])
+                        return ([], [], BoundaryQuery(key: boundaryKey(m), episode: current, next: following, ruleSaysNew: ruleSaysNew))
+                    } else {
+                        turnedOver = ruleSaysNew
+                    }
                 }
             }
 
@@ -329,7 +370,7 @@ final class Synthesizer {
                 pending = closed.removeLast()
             }
         }
-        return (closed, pending)
+        return (closed, pending, nil)
     }
 
     /// A task story built from the captured signals alone, for when no local

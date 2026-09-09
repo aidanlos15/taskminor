@@ -425,6 +425,47 @@ enum StoryWriter {
         return (titleOK ? title : fallbackTitle, storyOK ? story : fallbackStory)
     }
 
+    // MARK: - Where a job ends
+
+    /// The job so far and the minutes that follow, in words, with one question.
+    /// The model answers SAME or NEW. Kept tiny so it can be asked at every
+    /// turnover without slowing capture.
+    static func boundaryPrompt(episode: [MinuteSummary], next: [MinuteSummary]) -> String {
+        let r = taskRecord(minutes: episode, transfers: [])
+        var soFar = r.lengthWords
+        if !r.ranked.isEmpty { soFar += "; " + r.ranked.prefix(5).map { "\($0.window.label) (\($0.share))" }.joined(separator: "; ") }
+        if !r.fields.isEmpty { soFar += "; fields: " + r.fields.prefix(5).joined(separator: ", ") }
+        let then = next.map { $0.text.isEmpty ? "Worked on this Mac." : $0.text }.joined(separator: " / ")
+        return """
+        Decide whether a person has moved on to a different job. Reply with one word: SAME or NEW.
+
+        SAME means the minutes that follow are part of the job so far, even if a different window is used for it: looking something up, replying to a message, a quick check.
+        NEW means a different job has started: different windows for a different purpose, with no return to the job so far.
+
+        Example
+        Job so far: about a quarter of an hour; Google Chrome "Vendor Bills - NetSuite" (most of the time); Microsoft Excel "Purchase Orders.xlsx" (part of the time); fields: Invoice Number, Amount
+        Then: Worked briefly in Microsoft Outlook (Inbox). / Worked in Google Chrome (Vendor Bills - NetSuite), copying and pasting. / Worked in Microsoft Excel (Purchase Orders.xlsx).
+        Answer: SAME
+
+        Example
+        Job so far: about half an hour; Google Chrome "Vendor Bills - NetSuite" (most of the time); Microsoft Excel "Purchase Orders.xlsx" (part of the time); fields: Invoice Number, Amount
+        Then: Typed at length in Microsoft Word (Site safety plan.docx). / Typed at length in Microsoft Word (Site safety plan.docx). / Worked in Safari (Procore).
+        Answer: NEW
+
+        Job so far: \(soFar)
+        Then: \(then)
+        Answer:
+        """
+    }
+
+    /// true = a new job started, false = the same job continues, nil = no answer.
+    static func parseBoundary(_ raw: String) -> Bool? {
+        let word = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if word.hasPrefix("NEW") { return true }
+        if word.hasPrefix("SAME") { return false }
+        return nil
+    }
+
     // MARK: - Checks
 
     enum Check {
