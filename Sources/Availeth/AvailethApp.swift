@@ -58,6 +58,14 @@ struct AvailethApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var state = AppState.shared
 
+    private static let menuBarMark: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "pdf"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        return image
+    }()
+
     var body: some Scene {
         Window("Availeth", id: "dashboard") {
             DashboardRoot()
@@ -69,7 +77,14 @@ struct AvailethApp: App {
             MenuBarView()
                 .environmentObject(state)
         } label: {
-            Image(systemName: "chart.bar.doc.horizontal")
+            // The Availeth mark as a template image: one colour, tinted by macOS
+            // like every other menu bar item, so it reads as ours and not as a
+            // stock document glyph.
+            if let mark = Self.menuBarMark {
+                Image(nsImage: mark)
+            } else {
+                Image(systemName: "chart.bar.doc.horizontal")
+            }
         }
         .menuBarExtraStyle(.window)
     }
