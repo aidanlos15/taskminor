@@ -21,7 +21,7 @@ struct TasksView: View {
         ScrollView {
             VStack(spacing: 16) {
                 Card(title: "Tasks", subtitle: "detail") {
-                    Text("Every distinct piece of work — click one to see exactly what happened, in detail (prompts, answers, on-screen content). Richest with Storyline + Detailed capture on.")
+                    Text("Every distinct piece of work. Click one to see exactly what happened: prompts, answers, what was on screen. Richest with screen capture on.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -44,7 +44,7 @@ struct TasksView: View {
                             icon: "list.bullet.rectangle",
                             title: "No tasks here yet",
                             message: search.isEmpty
-                                ? "Tasks appear once Availeth has observed some work. Turn on Storyline + Detailed (Privacy tab) for a full account of what each task was."
+                                ? "Tasks appear once Availeth has watched you work for a while. Turn on screen capture in the Privacy tab for a full account of what each task was."
                                 : "Nothing matches “\(search)”."
                         )
                     } else {
@@ -170,7 +170,7 @@ struct TasksView: View {
                 }
             }
             if task.moments.isEmpty {
-                Text("No screen content was captured for this task. Turn on Storyline + Detailed in the Privacy tab to record what each task involves.")
+                Text("No screen content was captured for this task. Turn on screen capture in the Privacy tab to record what each task involves.")
                     .font(.system(size: 11)).foregroundStyle(Theme.ink3)
             }
         }

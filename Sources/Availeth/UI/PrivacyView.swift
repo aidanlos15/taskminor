@@ -15,6 +15,8 @@ struct PrivacyView: View {
     @State private var showAddExclusion = false
     @State private var exclusionSearch = ""
     @State private var hoveredApp: String?
+    @StateObject private var installer = ModelInstaller()
+    @State private var daemonRunning = false
 
     private var dataSummary: String {
         var parts = ["\(liveSpanCount) activity records"]
@@ -34,8 +36,10 @@ struct PrivacyView: View {
                 statusCard
                 windowTitlesCard
                 capabilitiesCard
+                localAICard
                 exclusionsCard
                 dataCard
+                sampleDataCard
                 neverCollectedCard
             }
             .padding(20)
@@ -156,8 +160,8 @@ struct PrivacyView: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Theme.ink)
                     Text(axTrusted
-                         ? "Reads the focused window's title (e.g. “Purchase Orders.xlsx”) — read-only, never controls anything."
-                         : "Without this, Availeth only sees which app is frontmost. Grant Accessibility to group time by document.")
+                         ? "Reads the title of the window you are in, like “Purchase Orders.xlsx”. It only ever reads. It never controls anything."
+                         : "Without this, Availeth only sees which app is in front. Grant Accessibility to group your time by document.")
                         .font(.caption)
                         .foregroundStyle(Theme.ink2)
                         .fixedSize(horizontal: false, vertical: true)
@@ -193,7 +197,7 @@ struct PrivacyView: View {
                 )
             ) {
                 if state.engine.telemetryMode != .off && !inputMonitoringGranted {
-                    permissionWarning("Needs Input Monitoring — grant it, then relaunch.",
+                    permissionWarning("Needs Input Monitoring. Grant it, then relaunch.",
                                       grant: { requestInputMonitoring() })
                 } else if state.engine.telemetryMode != .off && !axTrusted {
                     subNote("Field names also need Window-title capture, enabled above.")
@@ -231,8 +235,8 @@ struct PrivacyView: View {
                     HStack(spacing: 8) {
                         StatusDot(color: state.engine.interpreterReady ? Theme.good : Theme.amber, halo: false, size: 7)
                         Text(state.engine.interpreterReady
-                             ? "Local model ready: \(state.engine.sceneInterpreterName)"
-                             : "Local model not reachable — start Ollama and pull a vision model (e.g. qwen2.5vl:7b).")
+                             ? "Vision model ready: \(state.engine.sceneInterpreterName)"
+                             : "Vision model not installed. Screen capture needs it. See Local AI below.")
                             .font(.caption).foregroundStyle(Theme.ink2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -274,7 +278,114 @@ struct PrivacyView: View {
             screenRecordingGranted = Permissions.screenRecordingGranted
             inputMonitoringGranted = Permissions.inputMonitoringGranted
         }
-        .onAppear { if state.engine.screenshotMode == .storyline { state.engine.refreshInterpreterStatus() } }
+        .onAppear { refreshDaemon() }
+        .onChange(of: installer.state) { if installer.state == .done { refreshDaemon() } }
+    }
+
+    // MARK: - Local AI
+
+    /// Both local models, whether each is installed, its real download size and
+    /// what it is for, with the exact commands. Always shown, not only when screen
+    /// capture is on: the story layer quietly depends on the text model and the
+    /// user had no other way to discover that.
+    private var localAICard: some View {
+        Card(title: "Local AI", subtitle: "Runs on this Mac through Ollama · nothing is sent to the internet") {
+            Text("Availeth writes your task stories with a small text model. Screen capture additionally reads each new screen with a vision model.")
+                .font(.caption).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+
+            modelStatusLine(ready: state.engine.textModelReady, title: "Text model", name: state.engine.textModelName, size: "1.9 GB",
+                            need: "Writes the Story tab. Without it each minute still gets a line built from the signals, but not a written account.")
+            modelStatusLine(ready: state.engine.interpreterReady, title: "Vision model", name: state.engine.visionModelName, size: "6.0 GB",
+                            need: "Only needed for screen capture, which reads what is on screen.")
+
+            if !state.engine.textModelReady || !state.engine.interpreterReady {
+                hairline
+                if daemonRunning {
+                    installProgress
+                } else {
+                    // The service itself is missing. It is a 196 MB download and
+                    // installs like any other Mac app; the models come after, in
+                    // the app, with a progress bar.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Availeth needs Ollama, the free service that runs the models on this Mac. Install it once, then Availeth fetches the models it needs here.")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Link("Download Ollama (196 MB)", destination: URL(string: "https://ollama.com/download")!)
+                            Button("Check again") { refreshDaemon() }
+                        }
+                        .font(.caption).controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Download progress, or a button per missing model. No terminal.
+    @ViewBuilder
+    private var installProgress: some View {
+        switch installer.state {
+        case .pulling(let percent, let detail):
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Downloading \(installer.model)").font(.caption.weight(.medium)).foregroundStyle(Theme.ink)
+                ProgressView(value: percent).progressViewStyle(.linear).tint(Theme.accent)
+                HStack {
+                    Text(detail).font(.caption2).foregroundStyle(Theme.ink2)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }.controlSize(.small).font(.caption2)
+                }
+            }
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(message).font(.caption).foregroundStyle(Theme.amber).fixedSize(horizontal: false, vertical: true)
+                Button("Try again") { refreshDaemon() }.controlSize(.small).font(.caption)
+            }
+        case .done, .idle:
+            HStack(spacing: 10) {
+                if !state.engine.textModelReady {
+                    Button("Install text model (1.9 GB)") { installer.pull(state.engine.textModelName) }
+                        .buttonStyle(.borderedProminent).tint(Theme.accent)
+                }
+                if !state.engine.interpreterReady {
+                    Button("Install vision model (6.0 GB)") { installer.pull(state.engine.visionModelName) }
+                }
+                Spacer()
+            }
+            .controlSize(.small).font(.caption)
+        }
+    }
+
+    private func refreshDaemon() {
+        state.engine.refreshInterpreterStatus()
+        Task { daemonRunning = await ModelInstaller.daemonRunning() }
+    }
+
+    private func modelStatusLine(ready: Bool, title: String, name: String, size: String, need: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            StatusDot(color: ready ? Theme.good : Theme.amber, halo: false, size: 7).padding(.top, 5)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(ready ? "\(title) ready: \(name)" : "\(title) not installed: \(name), \(size)")
+                    .font(.caption.weight(.medium)).foregroundStyle(Theme.ink)
+                Text(need).font(.caption2).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Sample data
+
+    /// The sample dataset lives here rather than in the top bar. It is a made-up
+    /// finance department, and a permanent switch up there made it too easy to
+    /// read it as your own work.
+    private var sampleDataCard: some View {
+        Card(title: "Sample data", subtitle: "A made-up finance department · never mixed with your activity") {
+            Text("Two weeks of an invented finance team, so the dashboard can be explored before Availeth has watched you for long enough. It is not counted in any total.")
+                .font(.caption).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
+            Toggle("Show the sample dataset instead of my activity", isOn: Binding(
+                get: { state.showDemo },
+                set: { state.showDemo = $0 }
+            ))
+            .toggleStyle(.switch).tint(Theme.accent).controlSize(.small).font(.caption)
+        }
     }
 
     /// One capability row: icon + title + one-line description + an on/off switch,
@@ -360,7 +471,7 @@ struct PrivacyView: View {
                 .tint(Theme.accent)
                 .popover(isPresented: $showAddExclusion, arrowEdge: .bottom) { addExclusionPopover }
 
-                Text("Exclusions are per app. Private browser windows look the same as normal ones, so exclude the whole browser if that matters.")
+                Text("Exclusions work per app. A private browser window looks the same as a normal one, so exclude the whole browser if that matters to you.")
                     .font(.caption2)
                     .foregroundStyle(Theme.ink3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -504,7 +615,7 @@ struct PrivacyView: View {
                 Button("Delete all my captured data", role: .destructive) { confirmDeleteLive = true }
                     .tint(Theme.danger)
                     .confirmationDialog(
-                        "Delete every activity record Availeth has captured on this Mac? The demo dataset is kept. This cannot be undone.",
+                        "Delete every activity record Availeth has captured on this Mac? The sample dataset is kept. This cannot be undone.",
                         isPresented: $confirmDeleteLive
                     ) {
                         Button("Delete my data", role: .destructive) { state.deleteLiveData() }
@@ -531,7 +642,7 @@ struct PrivacyView: View {
                 ("keyboard", "Keystroke content — the characters typed are never recorded, only counted"),
                 ("doc.text", "File contents — only a document's name and path, never the bytes inside"),
                 ("mic.slash", "Microphone or camera"),
-                ("network.slash", "Anything sent off this Mac — Storyline sends frames only to a local model on 127.0.0.1, which never leaves the machine; nothing goes to the internet"),
+                ("network.slash", "Anything sent off this Mac. Screen capture sends frames to a local model on 127.0.0.1. Nothing goes to the internet"),
                 ("eye.slash", "Anything at all from excluded apps — their windows are cut from screenshots too"),
             ]
             VStack(alignment: .leading, spacing: 8) {

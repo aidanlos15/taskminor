@@ -114,7 +114,7 @@ struct LogsView: View {
 
     private var storylineCard: some View {
         let entries = Array(timeline.prefix(80))
-        return Card(title: "Storyline", subtitle: "What a local vision model saw you doing, with away-from-keyboard time marked. Images are kept locally, auto-deleted after 24h; the model is told to avoid specifics and a local scrub strips emails, amounts, and ID numbers.") {
+        return Card(title: "Storyline", subtitle: "What a local vision model saw you doing. Time away from the keyboard is marked. Images stay on this Mac and are deleted after 24 hours. The model is told to avoid specifics, and a local scrub strips emails, amounts and ID numbers.") {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                     switch entry {
@@ -208,17 +208,20 @@ struct LogsView: View {
     // MARK: - Schema explainer
 
     private var schemaCard: some View {
-        Card(title: "What one activity record contains", subtitle: "Each activity record holds the fields below. Storyline mode additionally stores one-line scene descriptions, shown in the Storyline card above.") {
+        Card(title: "What one activity record contains", subtitle: "Each activity record holds the fields below. Screen capture also stores the one-line descriptions shown in the card above.") {
             VStack(alignment: .leading, spacing: 8) {
-                schemaRow("clock", "Start & end time", "When the window came to the front and when you left it. Idle time is cut off — away-from-keyboard never counts.")
-                schemaRow("app.badge", "App name & bundle ID", "Which application was in front, e.g. Google Chrome (com.google.Chrome). Captured with no special permissions.")
-                schemaRow("macwindow", "Window title", "The focused window's title bar text — only if you granted Accessibility. Empty otherwise. This is the only content-adjacent field.")
-                schemaRow("keyboard", "Keyboard & mouse activity (if enabled)", "Shortcuts used, keys/clicks counted, and which field was typed into — the structure of the work, never the characters typed.")
+                schemaRow("clock", "Start & end time", "When the window came to the front and when you left it. Idle time is cut off. Time away from the keyboard never counts.")
+                schemaRow("app.badge", "App name & bundle ID", "Which app was in front, for example Google Chrome. This needs no permission at all.")
+                schemaRow("macwindow", "Window title", "The title bar text of the window you were in. Filled in only if you granted Accessibility, and empty otherwise. This is the one field that comes close to your content.")
+                schemaRow("keyboard", "Keyboard & mouse activity (if enabled)", "Shortcuts used, keys and clicks counted, and which field was typed into. The shape of the work, never the characters.")
                 schemaRow("doc.text.magnifyingglass", "Document (if enabled)", "The name/path of the file open in the window — its identity, never its contents.")
                 schemaRow("tag", "Source flag", "Whether the record belongs to the demo dataset or your live capture. The two are never mixed.")
             }
             Rectangle().fill(Theme.line).frame(height: 1)
             Label {
+                Text("A data movement additionally records which window the data left, which window and field it landed in, and how long the two were apart. Never the thing that was copied.")
+                    .font(.caption).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Never in any record: the characters you typed, file contents, clipboard, microphone/camera, or anything from excluded apps.")
                     .font(.caption)
                     .foregroundStyle(Theme.ink2)

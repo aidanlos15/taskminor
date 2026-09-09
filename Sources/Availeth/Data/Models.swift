@@ -23,9 +23,9 @@ enum InputTelemetryMode: String, CaseIterable, Identifiable, Equatable {
         case .off:
             return "Your keyboard and mouse are not tracked at all."
         case .standard:
-            return "Records the shortcuts you use (like copy, paste, and find), when you move between fields with Tab, and how many keys and clicks a task takes — so a repeated copy-and-paste chore stands out. It counts keystrokes but never records the actual keys, so passwords and messages are never captured. Password fields and excluded apps record nothing at all."
+            return "Records the shortcuts you use, like copy, paste and find. Records when you move between fields with Tab, and how many keys and clicks a task takes. That is what makes a repeated copy-and-paste chore stand out. Keystrokes are counted, never read, so passwords and messages are never captured. Password fields and excluded apps record nothing at all."
         case .deep:
-            return "Everything in Standard, plus the name of each field you type into (like “Amount” or “Email”), read from the field's on-screen label — never from what you type. This makes the workflow map more detailed."
+            return "Everything in Standard. It also records the name of each field you type into, like “Amount” or “Email”. The name comes from the label on screen, never from what you type. This makes the workflow map more detailed."
         }
     }
 }
@@ -91,9 +91,9 @@ enum ScreenshotMode: String, CaseIterable, Identifiable, Equatable {
         case .off:
             return "No screen capture."
         case .thumbnails:
-            return "Occasional captures, downscaled and blurred locally before storage, auto-deleted after 24 hours."
+            return "Occasional captures. Each one is shrunk and blurred on this Mac before it is saved, then deleted after 24 hours."
         case .storyline:
-            return "Each capture is read by a local vision model (Ollama) into a one-line description of the task, then the image is deleted immediately — only the text is kept. Nothing leaves this Mac."
+            return "A local vision model reads each capture and writes one line about the task. The image is deleted straight away and only the line is kept. Nothing leaves this Mac."
         }
     }
 }
@@ -118,9 +118,9 @@ enum CaptureDepth: String, CaseIterable, Identifiable, Equatable {
     var blurb: String {
         switch self {
         case .activity:
-            return "One line per moment describing the task, with names/numbers/emails scrubbed out. Best for privacy."
+            return "One line per moment describing the task. Names, numbers and emails are stripped out. Best for privacy."
         case .detailed:
-            return "Reads what's actually on screen — the specific page, the form fields and their values, the questions asked of AI tools, the apparent goal. Far richer for judging what can be automated, but stores more sensitive content. Use with consent."
+            return "Reads what is on screen: the page, the form fields and their values, the questions asked of AI tools, the apparent goal. Much better for judging what can be automated. It also stores more sensitive content, so use it only with consent."
         }
     }
 }
@@ -256,6 +256,34 @@ struct DailyTotal: Identifiable, Equatable {
 
 /// A repeated cross-app sequence detected by the pattern miner —
 /// a candidate workflow that could be automated.
+/// One movement of data between two contexts: a copy or cut in one place followed
+/// within a short window by a paste somewhere else. This is the primary evidence
+/// of a mechanical chore, and it is structure only: which app and window the data
+/// left, which app, window and field it landed in, and how long that took. Never
+/// what was copied.
+struct Transfer: Identifiable, Equatable {
+    var id: Int64 = 0
+    /// Moment of the paste.
+    var at: Date
+    var fromBundleID: String
+    var fromApp: String
+    /// Workflow unit of the source (site for browsers, app otherwise).
+    var fromUnit: String
+    var fromTitle: String
+    var toBundleID: String
+    var toApp: String
+    var toUnit: String
+    var toTitle: String
+    /// On-screen label of the field pasted into, "" if none was in focus.
+    var toField: String
+    /// Seconds between the copy and the paste.
+    var gapSeconds: TimeInterval
+    var isDemo: Bool = false
+
+    /// "Excel → NetSuite", the hop this transfer represents.
+    var hop: String { "\(fromUnit) → \(toUnit)" }
+}
+
 struct WorkflowPattern: Identifiable, Equatable {
     var id: String { apps.joined(separator: ">") }
     /// Ordered app names forming the repeated sequence, e.g. ["Mail", "Preview", "Excel", "Chrome"].
@@ -278,6 +306,18 @@ struct WorkflowPattern: Identifiable, Equatable {
     /// The most representative window title for each app step, in order — a
     /// clearer "what happened at each step" than the bare app names.
     var stepLabels: [String] = []
+
+    /// Where the pattern came from. Transfer-derived patterns are built from
+    /// copy-and-paste movements between contexts and are the primary evidence;
+    /// sequence-derived ones come from repeated window orders and are weaker.
+    enum Source: String, Equatable { case transfers, sequence }
+    var source: Source = .sequence
+    /// Field labels pasted or typed into on at least half the runs.
+    var fields: [String] = []
+    /// Cross-context copy-and-paste movements across all occurrences.
+    var transferCount: Int = 0
+    /// The shared automation judgement, when it has been computed.
+    var verdict: Verdict? = nil
 
     /// A single (possibly partial) observed day is too thin to annualize —
     /// the UI shows projections only when this is true.

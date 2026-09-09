@@ -229,6 +229,17 @@ struct PanelHeader: View {
     }
 }
 
+/// The wordmark as it is set on availeth.io: "Availeth" in the ink colour
+/// with the full stop in Availeth blue, tight tracking.
+struct Wordmark: View {
+    var size: CGFloat
+    var body: some View {
+        (Text("Availeth").foregroundColor(Theme.ink) + Text(".").foregroundColor(Theme.accent))
+            .font(.system(size: size, weight: .bold))
+            .tracking(-size * 0.02)
+    }
+}
+
 /// The app icon rendered as the sidebar mark — loads the bundled AppIcon so the
 /// sidebar logo is byte-identical to the Dock icon (no drift, no overlap).
 struct LogoMark: View {

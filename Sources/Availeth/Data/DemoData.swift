@@ -160,7 +160,7 @@ enum DemoData {
                 title: "Supplier invoice processing",
                 apps: "Mail, Preview, Microsoft Excel, Google Chrome",
                 automatable: "High — repeated copy/paste between systems, structured data entry into fields",
-                story: "The employee opened a supplier invoice from email, checked the PDF, looked up the purchase order in a spreadsheet, then re-entered the supplier, invoice number, and amount into NetSuite and submitted the bill for approval. The same copy-from-spreadsheet, paste-into-ERP pattern repeats every invoice — a strong candidate for automated extraction and posting.",
+                story: "Opened a supplier invoice from email and checked the PDF, then looked up its purchase order in the spreadsheet. Re-entered the supplier, invoice number and amount into a vendor bill in NetSuite and submitted it for approval.",
                 startHour: 9.1,
                 minutes: [
                     ("Opened a supplier invoice email and saved the attached PDF.", 12, 4, "⌘S×1", ""),
@@ -175,7 +175,7 @@ enum DemoData {
                 title: "CRM opportunity updates",
                 apps: "Google Chrome, Microsoft Excel",
                 automatable: "Medium — structured data entry into fields, form/tab navigation",
-                story: "The employee worked through the sales pipeline in Salesforce, cross-checking figures against a deal-tracking spreadsheet and updating each opportunity's stage and amount by hand. The lookups and field updates are consistent enough to be driven from the spreadsheet automatically.",
+                story: "Worked through the sales pipeline in Salesforce with the deal-tracking spreadsheet open alongside. Checked each opportunity's figures against the spreadsheet and typed the updated stage and amount into Salesforce by hand.",
                 startHour: 11.0,
                 minutes: [
                     ("Reviewed the Q3 pipeline in Salesforce and opened the deal-tracker spreadsheet.", 10, 5, "⌘F×1, ↵×1", "Account Search [search]"),
@@ -188,7 +188,7 @@ enum DemoData {
                 title: "Weekly report preparation",
                 apps: "Microsoft Excel, Keynote, Mail",
                 automatable: "Medium — heavy manual typing, repetitive data entry",
-                story: "The employee pulled weekly figures into a spreadsheet, rebuilt the same summary slides in Keynote, and emailed the report. The report structure is identical each week — a candidate for templated generation from the source data.",
+                story: "Compiled the weekly figures in the operations report spreadsheet, then rebuilt the summary slides in Keynote from them. Emailed the finished report from Mail.",
                 startHour: 14.5,
                 minutes: [
                     ("Compiled weekly figures in the operations report spreadsheet.", 210, 8, "⌘C×3, ⌘V×3", ""),
@@ -219,6 +219,48 @@ enum DemoData {
 
     /// A couple of away-from-keyboard stretches so idle handling is visible in
     /// the demo (e.g. a lunch break and an end-of-day gap).
+    /// The copy-and-paste movements behind the invoice and CRM loops, derived
+    /// from the generated spans so the two always line up. Generating them
+    /// independently produced transfers that fell outside their own runs, which
+    /// left the miner with no fields and made a clean invoice loop look like
+    /// reading. Structure only, as with a real capture.
+    static func generateTransfers(now: Date = Date()) -> [Transfer] {
+        let spans = generate(now: now)
+        var out: [Transfer] = []
+
+        /// The field a paste landed in, taken from the destination span.
+        func field(_ span: ActivitySpan, _ preferred: String) -> String {
+            let names = span.fields.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            return names.first { $0.hasPrefix(preferred) } ?? names.first ?? ""
+        }
+
+        for (i, span) in spans.enumerated() where i > 0 {
+            let prev = spans[i - 1]
+            // The invoice loop's two hops: mail into the spreadsheet, spreadsheet
+            // into the ERP. Both are marked in the spans by a copy then a paste.
+            guard prev.shortcuts.contains("⌘C") || prev.shortcuts.contains("⌘S"),
+                  span.shortcuts.contains("⌘V"),
+                  prev.appName != span.appName else { continue }
+            let gap = max(3, span.start.timeIntervalSince(prev.end))
+            guard gap < 90 else { continue }
+
+            // A paste that fills several fields is several movements.
+            let targets = span.fields.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let count = max(1, min(3, targets.count))
+            for k in 0..<count {
+                out.append(Transfer(
+                    at: span.start.addingTimeInterval(Double(k) * 12 + 5),
+                    fromBundleID: prev.bundleID, fromApp: prev.appName,
+                    fromUnit: WorkflowUnit.label(app: prev.appName, title: prev.windowTitle), fromTitle: prev.windowTitle,
+                    toBundleID: span.bundleID, toApp: span.appName,
+                    toUnit: WorkflowUnit.label(app: span.appName, title: span.windowTitle), toTitle: span.windowTitle,
+                    toField: k < targets.count ? targets[k] : field(span, ""),
+                    gapSeconds: gap, isDemo: true))
+            }
+        }
+        return out
+    }
+
     static func generateIdleSessions(now: Date = Date()) -> [IdleSession] {
         let cal = Calendar.current
         var out: [IdleSession] = []

@@ -94,6 +94,27 @@ enum WorkflowInsighter {
             steps[i].content = pick?.text ?? ""
         }
 
+        // One judgement for the whole app. A transfer-derived pattern arrives with
+        // its verdict already computed by the miner; a sequence-derived one is
+        // judged here from the same Evidence shape, so the Workflows tab and the
+        // Story cards can never disagree about the same work.
+        var pattern = pattern
+        if pattern.verdict == nil {
+            let runTransfers = pattern.windows.flatMap { w in
+                store.transfers(from: w.start.addingTimeInterval(-windowPad), to: w.end.addingTimeInterval(windowPad), demo: demo)
+            }
+            let evidence = Evidence.gather(
+                occSpans: occSpans,
+                transfers: runTransfers,
+                daysObserved: TransferMiner.distinctDays(pattern.windows.map(\.end)),
+                durations: occSpans.map { run in run.reduce(0.0) { $0 + $1.duration } }
+            )
+            let v = Verdict.assess(evidence)
+            pattern.verdict = v
+            pattern.automationScore = v.score
+            pattern.fields = evidence.consistentFields
+            pattern.transferCount = runTransfers.count
+        }
         let analysis = analyzeAutomation(pattern: pattern, occSpans: occSpans, narratives: runNarr)
 
         return WorkflowInsight(
@@ -184,6 +205,12 @@ enum WorkflowInsighter {
     /// app while thinking) is NOT enough: that's reading/analysis a person does,
     /// and we say so plainly instead of inventing a bogus dollar figure.
     static func analyzeAutomation(pattern: WorkflowPattern, occSpans: [[ActivitySpan]], narratives: [SceneNarrative]) -> (text: String, automatable: Bool) {
+        // The verdict decides; this only explains it in words. Before, this
+        // function made its own call from one window's worth of activity, so a
+        // developer checking email read as highly automatable.
+        if let v = pattern.verdict {
+            return (explain(verdict: v, pattern: pattern, occSpans: occSpans, narratives: narratives), v.isCandidate)
+        }
         let allSpans = occSpans.flatMap { $0 }
 
         // 1. Cross-system data transfer: copy in one app, paste in a different one.
@@ -220,7 +247,39 @@ enum WorkflowInsighter {
             return ("This looks mostly like \(cognitive) — the kind of judgement and thinking work a person does, not a mechanical task. It isn't a strong automation candidate. (An AI can *assist* here, but it can't run it unattended.)", false)
         }
         let apps = distinct(pattern.apps.map(shortApp))
-        return ("You repeat this move between \(apps.joined(separator: ", ")), but there's no sign of data being moved or forms being filled — so it looks like navigation or reading rather than a task to automate. Turn on Storyline (Privacy tab) to capture more detail, or treat this as low-priority.", false)
+        return ("You repeat this move between \(apps.joined(separator: ", ")), but nothing was moved and no forms were filled. It looks like reading or navigating rather than a task to automate. Turn on screen capture in the Privacy tab to capture more detail, or treat this as low priority.", false)
+    }
+
+    /// Puts the shared verdict into words, with the specifics that earned it.
+    static func explain(verdict v: Verdict, pattern: WorkflowPattern, occSpans: [[ActivitySpan]], narratives: [SceneNarrative]) -> String {
+        var parts: [String] = []
+        switch v.level {
+        case .insufficient:
+            parts.append("Seen \(pattern.occurrences) time\(pattern.occurrences == 1 ? "" : "s") across \(pattern.daysObserved) day\(pattern.daysObserved == 1 ? "" : "s"). Availeth waits for \(Verdict.minOccurrences) runs on \(Verdict.minDays) separate days before judging whether something is worth automating, so that a busy hour is never mistaken for a routine.")
+        case .low:
+            let apps = distinct(pattern.apps.map(shortApp))
+            parts.append("You repeat this move between \(apps.joined(separator: ", ")), but the evidence points away from a chore: \(v.reasons.joined(separator: ", ")).")
+            if let cognitive = dominantCognitiveKind(narratives) {
+                parts.append("It looks mostly like \(cognitive), which a person does rather than a rule.")
+            }
+        case .medium, .high:
+            let allSpans = occSpans.flatMap { $0 }
+            let copyApp = mostCommonApp(allSpans.filter { $0.shortcuts.contains("⌘C") })
+            let pasteApp = mostCommonApp(allSpans.filter { $0.shortcuts.contains("⌘V") })
+            if pattern.transferCount > 0, let copyApp, let pasteApp, copyApp != pasteApp {
+                parts.append("Data is carried from \(copyApp) into \(pasteApp) by hand, \(pattern.transferCount) time\(pattern.transferCount == 1 ? "" : "s") across the runs Availeth watched. An automation could pass it straight between their APIs.")
+            } else if pattern.transferCount > 0 {
+                parts.append("Data is carried between these steps by hand, \(pattern.transferCount) time\(pattern.transferCount == 1 ? "" : "s") across the runs Availeth watched.")
+            }
+            if !pattern.fields.isEmpty {
+                parts.append("The same fields are filled on most runs (\(pattern.fields.prefix(5).joined(separator: ", "))), so they could be filled from the source instead of typed.")
+            }
+            parts.append("Seen \(pattern.occurrences) times across \(pattern.daysObserved) days.")
+            if pattern.projectionIsReliable {
+                parts.append("At the rate observed, that is about \(Format.hours(pattern.estimatedHoursPerYear)) a year.")
+            }
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Field names that appear on at least half the occurrences, after stripping

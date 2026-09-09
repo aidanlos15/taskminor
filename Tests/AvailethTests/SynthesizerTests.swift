@@ -69,7 +69,8 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertFalse(ctx!.isAway)
         XCTAssertEqual(ctx!.keystrokes, 20)
         XCTAssertTrue(ctx!.prompt.contains("Searching a spreadsheet"))
-        XCTAssertTrue(ctx!.prompt.contains("⌘C"))
+        XCTAssertTrue(ctx!.prompt.contains("Keys: copy"), ctx!.prompt)
+        XCTAssertFalse(ctx!.prompt.contains("⌘"), "symbols are translated before the model sees them")
     }
 
     func testIdleMinuteMarkedAway() {
@@ -82,18 +83,29 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertNil(Synthesizer.buildMinuteContext(minute: base, narratives: [], spans: [], idleSeconds: 0, idleFractionForAway: 0.6))
     }
 
-    // MARK: - Automatable heuristic
+    // MARK: - Automatable verdict (shared with the Workflows tab)
 
-    func testCopyPasteAcrossAppsScoresHigh() {
+    /// Copy-and-paste across apps is only a candidate once it has RECURRED.
+    /// The same minute judged on its own says so instead of guessing.
+    func testCopyPasteAcrossAppsNeedsRecurrenceBeforeScoringHigh() {
         let mins = [
-            minute(0, apps: "Excel, Chrome", keys: 40, shortcuts: "⌘C×3, ⌘V×3, Tab×5", fields: "A [identifier], B [currency], C [identifier]"),
+            minute(0, apps: "Excel, Chrome", keys: 40, shortcuts: "⌘C×3, ⌘V×3, Tab×5", fields: "Invoice Number [identifier], Amount [currency], PO Number [identifier]"),
         ]
-        XCTAssertTrue(Synthesizer.automatableAssessment(mins).hasPrefix("High"))
+        let onceOnly = Synthesizer.automatableAssessment(mins, occurrences: 1, daysObserved: 1, transfers: 3, durations: [180])
+        XCTAssertTrue(onceOnly.hasPrefix("Not enough evidence yet"), onceOnly)
+
+        let recurring = Synthesizer.automatableAssessment(mins, occurrences: 9, daysObserved: 5, transfers: 27,
+                                                          durations: Array(repeating: 180, count: 9))
+        XCTAssertTrue(recurring.hasPrefix("High"), recurring)
     }
 
-    func testBrowsingScoresLow() {
+    /// Browsing with nothing moved and no fields filled stays Low even when it
+    /// has recurred plenty.
+    func testBrowsingScoresLowEvenWhenItRecurs() {
         let mins = [minute(0, apps: "Chrome", keys: 5, shortcuts: "↓×3", fields: "")]
-        XCTAssertTrue(Synthesizer.automatableAssessment(mins).hasPrefix("Low"))
+        let v = Synthesizer.automatableAssessment(mins, occurrences: 12, daysObserved: 6, transfers: 0,
+                                                  durations: Array(repeating: 200, count: 12))
+        XCTAssertTrue(v.hasPrefix("Low"), v)
     }
 
     // MARK: - Parsing
@@ -107,7 +119,7 @@ final class SynthesizerTests: XCTestCase {
 
     func testParseFallsBackWhenUnformatted() {
         let (title, story) = Synthesizer.parseTitleAndStory("just a blob of text", fallbackApps: ["Excel"])
-        XCTAssertEqual(title, "Excel workflow")
+        XCTAssertEqual(title, "Excel")
         XCTAssertEqual(story, "just a blob of text")
     }
 
@@ -147,5 +159,217 @@ final class SynthesizerTests: XCTestCase {
         XCTAssertLessThanOrEqual(floored, d)
         // Already on a boundary → unchanged.
         XCTAssertEqual(Synthesizer.floorToMinute(Date(timeIntervalSince1970: 1_699_999_980)).timeIntervalSince1970, 1_699_999_980, accuracy: 0.0001)
+    }
+}
+
+// MARK: - Running with no local model
+//
+// The whole story layer used to sit behind `guard await interpreter.isAvailable()`,
+// so a Mac with no Ollama produced no minute summaries, no tasks and a Story tab
+// that told the user to keep waiting for something that would never arrive.
+
+/// Answers "not available" to everything, like a Mac with no Ollama installed.
+private final class UnavailableInterpreter: SceneInterpreter {
+    var displayName: String { "none" }
+    func isAvailable() async -> Bool { false }
+    func isTextAvailable() async -> Bool { false }
+    func narrate(pngData: Data, context: SceneContext) async -> String? { nil }
+    func summarize(prompt: String, maxTokens: Int) async -> String? {
+        XCTFail("summarize must not be called when no model is available")
+        return nil
+    }
+}
+
+final class SynthesizerNoModelTests: XCTestCase {
+    private func tempStore() -> Store {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("av-nomodel-\(UUID().uuidString).sqlite")
+        return Store(url: url)
+    }
+
+    /// With no model, every complete minute is still summarized. Before the fix
+    /// this produced zero rows.
+    func testMinutesAreStillSummarizedWithNoModel() async {
+        let store = tempStore()
+        let now = Date()
+        let minuteStart = Synthesizer.floorToMinute(now.addingTimeInterval(-120))
+        _ = store.insert(ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel",
+                                      windowTitle: "Purchase Orders.xlsx",
+                                      start: minuteStart, end: minuteStart.addingTimeInterval(50),
+                                      isDemo: false, keystrokes: 120, clicks: 8,
+                                      shortcuts: "Copy, Paste", fields: "Amount"))
+
+        // The first run walks forward from two hours ago, 8 minutes at a time, so
+        // widen the budget to reach a span two minutes old inside one call.
+        var cfg = Synthesizer.Config(); cfg.maxMinutesPerRun = 200
+        let synth = Synthesizer(store: store, interpreter: UnavailableInterpreter(), config: cfg)
+        await synth.run(now: now)
+
+        let summaries = store.minuteSummaries(from: minuteStart, to: now, demo: false)
+        XCTAssertFalse(summaries.isEmpty, "no model must not mean no summaries")
+    }
+
+    /// The no-model line is built from the record: where the work was, how
+    /// much typing, what was typed into and what moved. Not a list of app names
+    /// and not a recital of counts.
+    func testFallbackTextUsesEverySignal() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let spans = [
+            ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel", windowTitle: "PO.xlsx",
+                         start: start, end: start.addingTimeInterval(20), keystrokes: 40, clicks: 4, shortcuts: "⌘C×2", fields: ""),
+            ActivitySpan(bundleID: "com.google.Chrome", appName: "Google Chrome", windowTitle: "Vendor Bills",
+                         start: start.addingTimeInterval(20), end: start.addingTimeInterval(55), keystrokes: 300, clicks: 20,
+                         shortcuts: "⌘V×2", fields: "Amount [currency], Invoice Number [identifier]"),
+        ]
+        let ctx = Synthesizer.buildMinuteContext(minute: start, narratives: [], spans: spans, idleSeconds: 0, idleFractionForAway: 0.6)!
+        XCTAssertEqual(ctx.fallbackText,
+                       "Typed at length in Microsoft Excel (PO.xlsx) and Google Chrome (Vendor Bills), copying and pasting. Typed into Amount, Invoice Number in Google Chrome.")
+    }
+
+    /// One window and a little typing reads as one plain sentence, never
+    /// "1 keystrokes".
+    func testFallbackTextSingularUnits() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let spans = [ActivitySpan(bundleID: "com.apple.mail", appName: "Mail", windowTitle: "Inbox",
+                                  start: start, end: start.addingTimeInterval(30), keystrokes: 1, clicks: 1, shortcuts: "", fields: "")]
+        let ctx = Synthesizer.buildMinuteContext(minute: start, narratives: [], spans: spans, idleSeconds: 0, idleFractionForAway: 0.6)!
+        XCTAssertEqual(ctx.fallbackText, "Worked briefly in Mail (Inbox).")
+    }
+
+    /// A scene narrative, when one exists, still wins over the generic line.
+    func testSceneTextWinsOverGenericLine() {
+        let ctx = Synthesizer.MinuteContext(
+            minute: Date(), apps: ["Google Chrome"], keystrokes: 10, clicks: 2,
+            shortcuts: "", fields: "", sceneTexts: ["Submitting a vendor bill in NetSuite."],
+            sourceCount: 1, isAway: false)
+        XCTAssertEqual(ctx.fallbackText, "Submitting a vendor bill in NetSuite.")
+    }
+
+    /// The task-level story is built from the signals when no model can write it.
+    func testSignalStoryDescribesTheTask() {
+        let mins = [
+            MinuteSummary(minuteStart: Date(), text: "", apps: "Microsoft Excel", keystrokes: 200, clicks: 10,
+                          shortcuts: "Copy, Paste", fields: "Amount", sourceCount: 1),
+            MinuteSummary(minuteStart: Date().addingTimeInterval(60), text: "", apps: "Google Chrome", keystrokes: 140, clicks: 14,
+                          shortcuts: "Paste, Find", fields: "Invoice Number", sourceCount: 1),
+        ]
+        let story = Synthesizer.signalStory(group: mins, apps: ["Microsoft Excel", "Google Chrome"])
+        XCTAssertTrue(story.contains("2 minutes"), story)
+        XCTAssertTrue(story.contains("340 keystrokes"), story)
+        XCTAssertTrue(story.contains("Paste"), story)
+        XCTAssertTrue(story.contains("Amount"), story)
+    }
+
+    /// The most-used shortcuts and fields come first, so the story names the
+    /// repeated action rather than an incidental one.
+    func testTopTokensRanksByFrequency() {
+        let top = Synthesizer.topTokens(["Copy, Paste", "Paste", "Paste, Find"], limit: 2)
+        XCTAssertEqual(top.first, "Paste")
+        XCTAssertEqual(top.count, 2)
+    }
+
+    /// Shortcut tokens carry counts; the same key across minutes sums rather
+    /// than appearing once per minute.
+    func testTopTokensMergesShortcutCounts() {
+        let top = Synthesizer.topTokens(["↵×1, ⌘V×2", "↵×3", "⌘V×1, Tab×4"], limit: 3)
+        XCTAssertEqual(top, ["Tab×4", "↵×4", "⌘V×3"], "ties sort by key: \(top)")
+    }
+}
+
+extension SynthesizerNoModelTests {
+    /// A fresh install must not walk through two hours of empty minutes one at a
+    /// time. It jumps to the first captured activity, so the first real summary
+    /// appears on the first run rather than 22 minutes later.
+    func testFirstRunSkipsDeadTimeAndSummarizesRealActivity() async {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("av-skip-\(UUID().uuidString).sqlite")
+        let store = Store(url: url)
+        let now = Date()
+        // Activity 3 minutes ago; the lookback window opens 2 hours ago.
+        let spanStart = Synthesizer.floorToMinute(now.addingTimeInterval(-180))
+        _ = store.insert(ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel",
+                                      windowTitle: "Purchase Orders.xlsx",
+                                      start: spanStart, end: spanStart.addingTimeInterval(50),
+                                      isDemo: false, keystrokes: 90, clicks: 6,
+                                      shortcuts: "Copy", fields: "Amount"))
+
+        // Default budget of 8 minutes per run: only reachable if dead time is skipped.
+        let synth = Synthesizer(store: store, interpreter: UnavailableInterpreter())
+        await synth.run(now: now)
+
+        let written = store.minuteSummaries(from: spanStart, to: now, demo: false)
+        XCTAssertTrue(written.contains { $0.text.contains("Microsoft Excel") },
+                      "the first run should reach real activity, got: \(written.map(\.text))")
+    }
+}
+
+/// Onboarding must not be marked complete when the user granted nothing.
+/// A single stray click on the first launch used to cost the app every
+/// capability permanently, with no second ask.
+final class OnboardingGateTests: XCTestCase {
+    /// Mirrors WelcomeSheet.finish()'s decision so the rule is pinned by a test
+    /// even though the sheet itself needs a running app to exercise.
+    private func shouldMarkOnboarded(ax: Bool, screen: Bool, input: Bool) -> Bool {
+        ax || screen || input
+    }
+
+    func testNothingGrantedDoesNotCompleteOnboarding() {
+        XCTAssertFalse(shouldMarkOnboarded(ax: false, screen: false, input: false))
+    }
+
+    func testAnySingleGrantCompletesOnboarding() {
+        XCTAssertTrue(shouldMarkOnboarded(ax: true, screen: false, input: false))
+        XCTAssertTrue(shouldMarkOnboarded(ax: false, screen: true, input: false))
+        XCTAssertTrue(shouldMarkOnboarded(ax: false, screen: false, input: true))
+    }
+}
+
+/// The model, not a clock, says where a job ends: at each point where the apps
+/// turn over the grouping stops and asks; its answer is honoured over the rule.
+final class BoundaryJudgeTests: XCTestCase {
+    private let base = Date(timeIntervalSince1970: 1_700_000_000)
+    private func minute(_ i: Int, apps: String, text: String = "work") -> MinuteSummary {
+        MinuteSummary(minuteStart: base.addingTimeInterval(Double(i) * 60), text: text, apps: apps, keystrokes: 40, clicks: 3, shortcuts: "", fields: "", sourceCount: 0)
+    }
+    private var mins: [MinuteSummary] {
+        (0..<3).map { minute($0, apps: "Microsoft Excel — PO.xlsx, Google Chrome — Vendor Bills") }
+            + (3..<6).map { minute($0, apps: "Microsoft Word — Site safety plan.docx", text: "Typed at length in Microsoft Word (Site safety plan.docx).") }
+    }
+    private var cfg: Synthesizer.Config { var c = Synthesizer.Config(); c.taskGraceSeconds = 0; return c }
+
+    func testTurnoverBecomesAQuestionWhenAJudgeIsPresent() {
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [:], askJudge: true)
+        XCTAssertNotNil(r.query)
+        XCTAssertEqual(r.query?.key, Synthesizer.boundaryKey(mins[3]))
+        XCTAssertEqual(r.query?.episode.count, 3)
+        XCTAssertEqual(r.query?.next.count, 3)
+        XCTAssertTrue(r.query?.ruleSaysNew ?? false, "the change holds for the next minute, so the rule alone would split")
+    }
+
+    func testJudgeSayingSameKeepsOneJob() {
+        let key = Synthesizer.boundaryKey(mins[3])
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [key: false], askJudge: true)
+        XCTAssertNil(r.query)
+        XCTAssertEqual(r.closed.count, 1)
+        XCTAssertEqual(r.closed.first?.count, 6)
+    }
+
+    func testJudgeSayingNewSplitsThere() {
+        let key = Synthesizer.boundaryKey(mins[3])
+        let r = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg, decisions: [key: true], askJudge: true)
+        XCTAssertEqual(r.closed.map(\.count), [3, 3])
+    }
+
+    func testWithoutAJudgeTheRuleDecides() {
+        let (closed, _) = Synthesizer.groupMinutes(mins, now: base.addingTimeInterval(3600), config: cfg)
+        XCTAssertEqual(closed.map(\.count), [3, 3])
+    }
+
+    func testBoundaryPromptIsShortAndParses() {
+        let p = StoryWriter.boundaryPrompt(episode: Array(mins.prefix(3)), next: Array(mins.suffix(3)))
+        XCTAssertTrue(p.contains("Job so far: a couple of minutes"), p)
+        XCTAssertTrue(p.contains("Then: Typed at length in Microsoft Word"), p)
+        XCTAssertLessThan(p.count, 2200, "the question must stay cheap enough to ask at every turnover")
+        XCTAssertEqual(StoryWriter.parseBoundary(" New\n"), true)
+        XCTAssertEqual(StoryWriter.parseBoundary("SAME."), false)
+        XCTAssertNil(StoryWriter.parseBoundary("Probably"))
     }
 }

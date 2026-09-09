@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18"/>
+      <feOffset dy="14" result="b"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.22"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <radialGradient id="gb" cx="0.28" cy="0.26" r="0.55"><stop offset="0" stop-color="#2478ff" stop-opacity="0.10"/><stop offset="1" stop-color="#2478ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="gg" cx="0.74" cy="0.76" r="0.55"><stop offset="0" stop-color="#2fbf71" stop-opacity="0.08"/><stop offset="1" stop-color="#2fbf71" stop-opacity="0"/></radialGradient>
+  </defs>
+  <!-- macOS tile: 824 px on the 1024 grid, Apple's icon proportions -->
+  <g filter="url(#sh)">
+    <rect x="100" y="100" width="824" height="824" rx="186" ry="186" fill="#ffffff"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="186" ry="186" fill="url(#gb)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" ry="186" fill="url(#gg)"/>
+  <rect x="101" y="101" width="822" height="822" rx="185" ry="185" fill="none" stroke="#1a1a1a" stroke-opacity="0.12" stroke-width="2"/>
+  <!-- the site's drafted-in corner bracket, top-left, in Availeth blue -->
+  <path d="M196 262 V196 H262" fill="none" stroke="#2478ff" stroke-width="16" stroke-linecap="square"/>
+  <!-- the Availeth mark, exactly as on availeth.io (512 grid), centred in the tile -->
+  <g transform="translate(103 119) scale(1.55)">
+    <g transform="translate(101.9773 380.2201) scale(0.171812 -0.171812)">
+      <path fill="#1a1a1a" d="M4.8 0.0 516.8 1490.0H991.36L1505.72 0.0H1103.96L901.92 654.8Q853.44 819.04 805.44 985.98Q757.44 1152.92 706.8 1348.04H804.4Q752.24 1152.92 703.48 985.98Q654.72 819.04 604.48 654.8L395.72 0.0ZM356.44 286.52V568.12H1154.84V286.52Z"/>
+      <path fill="#2478ff" d="M1700.04 -18.52Q1622.2 -18.52 1567.08 36.6Q1511.96 91.72 1511.96 169.56Q1511.96 247.64 1567.08 302.64Q1622.2 357.64 1700.04 357.64Q1778.12 357.64 1833.12 302.64Q1888.12 247.64 1888.12 169.56Q1888.12 91.72 1833.12 36.6Q1778.12 -18.52 1700.04 -18.52Z"/>
+    </g>
+  </g>
+</svg>

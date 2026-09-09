@@ -47,15 +47,26 @@ final class WorkflowInsightTests: XCTestCase {
         let store = Store.inMemory()
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         // A pattern whose Chrome step is "Vendor Bills — NetSuite".
-        let spans = (0..<4).flatMap { i -> [ActivitySpan] in
-            let base = now.addingTimeInterval(Double(i) * 600)
+        // Six runs spread over three days: enough to clear the evidence gate, so
+        // this test exercises step matching rather than the recurrence rule.
+        let spans = (0..<6).flatMap { i -> [ActivitySpan] in
+            let base = now.addingTimeInterval(Double(i / 2) * 86400 + Double(i % 2) * 600)
             return [
                 ActivitySpan(bundleID: "com.apple.mail", appName: "Mail", windowTitle: "Invoice #\(i)", start: base, end: base.addingTimeInterval(30)),
-                ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel", windowTitle: "Purchase Orders.xlsx", start: base.addingTimeInterval(35), end: base.addingTimeInterval(70), shortcuts: "⌘C×1"),
-                ActivitySpan(bundleID: "com.google.Chrome", appName: "Google Chrome", windowTitle: "Vendor Bills — NetSuite", start: base.addingTimeInterval(75), end: base.addingTimeInterval(120), shortcuts: "⌘V×1"),
+                ActivitySpan(bundleID: "com.microsoft.Excel", appName: "Microsoft Excel", windowTitle: "Purchase Orders.xlsx", start: base.addingTimeInterval(35), end: base.addingTimeInterval(70), keystrokes: 12, clicks: 3, shortcuts: "⌘C×1", fields: "PO Search"),
+                ActivitySpan(bundleID: "com.google.Chrome", appName: "Google Chrome", windowTitle: "Vendor Bills — NetSuite", start: base.addingTimeInterval(75), end: base.addingTimeInterval(120), keystrokes: 28, clicks: 5, shortcuts: "⌘V×1", fields: "Invoice Number [identifier], Amount [currency]"),
             ]
         }
         store.insertBatch(spans)
+        // The copy-and-paste movements behind those runs: Excel into NetSuite.
+        for i in 0..<6 {
+            let base = now.addingTimeInterval(Double(i / 2) * 86400 + Double(i % 2) * 600)
+            store.insert(transfer: Transfer(
+                at: base.addingTimeInterval(80),
+                fromBundleID: "com.microsoft.Excel", fromApp: "Microsoft Excel", fromUnit: "Microsoft Excel", fromTitle: "Purchase Orders.xlsx",
+                toBundleID: "com.google.Chrome", toApp: "Google Chrome", toUnit: "NetSuite", toTitle: "Vendor Bills — NetSuite",
+                toField: "Invoice Number", gapSeconds: 8))
+        }
         // A Salesforce narrative sitting inside one occurrence window but NOT part of the steps.
         store.insertNarrative(SceneNarrative(timestamp: now.addingTimeInterval(50), appName: "Google Chrome", windowTitle: "Q3 Pipeline — Salesforce", text: "Updating a CRM opportunity."))
         store.insertNarrative(SceneNarrative(timestamp: now.addingTimeInterval(76), appName: "Google Chrome", windowTitle: "Vendor Bills — NetSuite", text: "Submitting a vendor bill."))
@@ -67,8 +78,9 @@ final class WorkflowInsightTests: XCTestCase {
         // The Salesforce narrative must be excluded (different site); only NetSuite belongs.
         XCTAssertTrue(insight.moments.allSatisfy { !$0.windowTitle.contains("Salesforce") })
         // Copy in Excel, paste in NetSuite → correct unit attribution.
-        XCTAssertTrue(insight.whatToAutomate.contains("Excel") && insight.whatToAutomate.contains("NetSuite"))
-        XCTAssertTrue(insight.automatable)
+        XCTAssertTrue(insight.automatable, insight.whatToAutomate)
+        // Unit attribution: the prose names where the data came from and went to.
+        XCTAssertTrue(insight.whatToAutomate.contains("Excel"), insight.whatToAutomate)
     }
 
     /// Per-step detail must come ONLY from inside the workflow's own occurrences.

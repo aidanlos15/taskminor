@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Persist the in-progress span — otherwise the last (often longest)
         // stretch of work is lost on every quit, logout, and shutdown.
         AppState.shared.engine.shutdown()
+        OllamaService.shared.shutdown()   // stop our own copy; a customer's own service is left alone
     }
 }
 

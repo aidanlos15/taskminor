@@ -158,12 +158,18 @@ final class EnrichmentStoreTests: XCTestCase {
     }
 
     /// The interpreter reports unavailable gracefully when nothing answers.
+    /// Both roles must report separately: the story layer depends on the text
+    /// answer, storyline capture on the vision one.
     func testInterpreterUnavailableOnBadHost() async {
-        let interp = OllamaInterpreter(model: "none", host: "http://127.0.0.1:1")
+        let interp = OllamaInterpreter(visionModel: "none", textModel: "none", host: "http://127.0.0.1:1")
         let available = await interp.isAvailable()
         XCTAssertFalse(available)
+        let textAvailable = await interp.isTextAvailable()
+        XCTAssertFalse(textAvailable)
         let narrated = await interp.narrate(pngData: Data([0x89, 0x50]), context: SceneContext(appName: "x", windowTitle: "y"))
         XCTAssertNil(narrated)
+        let summarized = await interp.summarize(prompt: "hello", maxTokens: 10)
+        XCTAssertNil(summarized)
     }
 
     func testIdleSessionStoreAndTotal() {

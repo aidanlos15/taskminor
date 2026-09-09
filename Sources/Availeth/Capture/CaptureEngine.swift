@@ -26,11 +26,13 @@ final class CaptureEngine: ObservableObject {
 
     /// Nothing is excluded by default — Availeth records everything unless the
     /// user explicitly excludes an app in the Privacy tab.
-    static let defaultExclusions: Set<String> = []
+    /// Excluded on every install: password managers, messaging apps and System
+    /// Settings record nothing, and their windows are cut out of screenshots.
+    /// This is the privacy promise that lets the product be run on someone
+    /// else's staff; it was briefly removed and is deliberately back.
+    static let defaultExclusions: Set<String> = legacyDefaultExclusions
 
-    /// The set Availeth used to auto-exclude (password managers, messengers,
-    /// System Settings). Retained only so the version-3 migration can strip them
-    /// from existing installs; user-added exclusions outside this set are kept.
+    /// The same set under the name the migrations use.
     private static let legacyDefaultExclusions: Set<String> = [
         "com.1password.1password", "com.agilebits.onepassword7", "com.bitwarden.desktop",
         "org.keepassxc.keepassxc", "com.dashlane.dashlanephonefinal", "com.lastpass.lastpassmacdesktop",
@@ -41,7 +43,7 @@ final class CaptureEngine: ObservableObject {
     ]
     private static let exclusionsKey = "availeth.exclusions"
     private static let exclusionsVersionKey = "availeth.exclusionsVersion"
-    private static let exclusionsVersion = 3
+    private static let exclusionsVersion = 4
     private static let observingEnabledKey = "availeth.observingEnabled"
     private static let pausedUntilKey = "availeth.pausedUntil"
 
@@ -73,7 +75,17 @@ final class CaptureEngine: ObservableObject {
         didSet { UserDefaults.standard.set(captureDepth.rawValue, forKey: "availeth.cap.depth") }
     }
     /// Whether the local vision model (Ollama) is reachable for storyline mode.
+    /// Whether the local VISION model is reachable. Storyline capture needs it.
     @Published private(set) var interpreterReady = false
+    /// Whether the local TEXT model is reachable. The story layer needs only
+    /// this one, and it is a much smaller download.
+    @Published private(set) var textModelReady = false
+    /// The span in progress, republished about once a second so the dashboard
+    /// can show the current app growing in real time. A span is only WRITTEN
+    /// when it closes (on an app or window switch), so without this the
+    /// dashboard sat frozen for as long as someone stayed in one window while
+    /// the menu-bar clock kept counting. Its `end` is "now"; it is never stored.
+    @Published private(set) var liveSpan: ActivitySpan?
     /// Record which document is open (identity/path only, never contents).
     @Published var fileTrackingEnabled: Bool {
         didSet { UserDefaults.standard.set(fileTrackingEnabled, forKey: "availeth.cap.files") }
@@ -136,6 +148,9 @@ final class CaptureEngine: ObservableObject {
     private var narrating = false                     // one narration at a time
 
     var sceneInterpreterName: String { interpreter.displayName }
+    /// Names of the two models, for the Local AI panel.
+    var visionModelName: String { (interpreter as? OllamaInterpreter)?.visionModel ?? "a vision model" }
+    var textModelName: String { (interpreter as? OllamaInterpreter)?.textModel ?? "a text model" }
     var onScreenshotSaved: (() -> Void)?
 
     private let store: Store
@@ -144,6 +159,12 @@ final class CaptureEngine: ObservableObject {
 
     /// The span currently being accumulated.
     private var openSpan: (bundleID: String, appName: String, title: String, start: Date, docPath: String)?
+    /// Label of the text field currently in focus, as last pushed to the monitor.
+    private var currentFieldLabel = ""
+    /// The most recent copy or cut, waiting for a paste somewhere else.
+    private var lastCopy: (at: Date, bundleID: String, app: String, title: String)?
+    /// A paste this long after the copy is no longer treated as the same movement.
+    private let transferWindow: TimeInterval = 90
     /// Raw title seen on the previous tick — a new title must be stable for two
     /// consecutive ticks before it splits the span (defeats ticking-clock titles).
     private var previousTickTitle: String?
@@ -172,7 +193,10 @@ final class CaptureEngine: ObservableObject {
         } else if defaults.bool(forKey: "availeth.cap.input") {
             telemetryMode = .standard // migrate the earlier boolean capability
         } else {
-            telemetryMode = .deep // default for a fresh install
+            // Off on a fresh install. The Privacy card says "Off by default", the
+            // README says every capability is opt-in, and the welcome sheet
+            // offers the switch. Defaulting to on made all three untrue.
+            telemetryMode = .off
         }
         if let raw = defaults.string(forKey: "availeth.cap.screenshotMode"),
            let m = ScreenshotMode(rawValue: raw) {
@@ -180,17 +204,18 @@ final class CaptureEngine: ObservableObject {
         } else if defaults.bool(forKey: "availeth.cap.screenshots") {
             screenshotMode = .thumbnails // migrate the earlier boolean
         } else {
-            screenshotMode = .storyline // default for a fresh install
+            screenshotMode = .off // off on a fresh install, for the same reason as telemetry
         }
         fileTrackingEnabled = defaults.bool(forKey: "availeth.cap.files")
         captureDepth = defaults.string(forKey: "availeth.cap.depth").flatMap(CaptureDepth.init) ?? .detailed
 
-        // Exclusions: nothing is excluded by default now. The version-3 migration
-        // strips the apps Availeth used to auto-exclude from existing installs,
-        // while keeping any the user added themselves.
+        // Exclusions. Version 3 stripped the default set from existing installs;
+        // version 4 puts it back, keeping anything the user added or kept
+        // themselves. A user who removed a default app on purpose gets it back
+        // once here, which is the safer direction to be wrong in.
         if var saved = defaults.stringArray(forKey: Self.exclusionsKey).map(Set.init) {
-            if defaults.integer(forKey: Self.exclusionsVersionKey) < 3 {
-                saved.subtract(Self.legacyDefaultExclusions)
+            if defaults.integer(forKey: Self.exclusionsVersionKey) < 4 {
+                saved.formUnion(Self.defaultExclusions)
             }
             excludedBundleIDs = saved
         } else {
@@ -287,7 +312,10 @@ final class CaptureEngine: ObservableObject {
     private func syncInputMonitor() {
         inputMonitor.mode = telemetryMode
         inputMonitor.onNeedFieldRefresh = { [weak self] in self?.refreshFieldContextAsync() }
-        inputMonitor.onAction = { [weak self] reason in self?.scheduleActionCapture(reason: reason) }
+        inputMonitor.onAction = { [weak self] reason in
+            self?.noteTransfer(reason)
+            self?.scheduleActionCapture(reason: reason)
+        }
         let live = isObserving && !suspended && !isPaused
             && telemetryMode != .off && Permissions.inputMonitoringGranted
         if live {
@@ -324,11 +352,13 @@ final class CaptureEngine: ObservableObject {
     /// attribute typing to. Only genuine text inputs get a label.
     private func applyFieldContext(_ info: (label: String, isSecure: Bool, isTextInput: Bool)?, deep: Bool) {
         guard let info else {
+            currentFieldLabel = ""
             inputMonitor.setField(label: "", secure: false, className: nil)
             return
         }
         let label = (info.isTextInput && !info.isSecure) ? info.label : ""
         let className = (deep && !label.isEmpty) ? FieldClassifier.classify(label) : nil
+        currentFieldLabel = label
         inputMonitor.setField(label: label, secure: info.isSecure, className: className)
     }
 
@@ -525,9 +555,48 @@ final class CaptureEngine: ObservableObject {
             closeOpenSpan(end: now)
         }
         // File identity (path only, never contents) — read once when the span opens.
-        let docPath = (fileTrackingEnabled ? AXReader.focusedDocumentPath(pid: pid) : nil) ?? ""
+        var docPath = (fileTrackingEnabled ? AXReader.focusedDocumentPath(pid: pid) : nil) ?? ""
+        // For a browser, the page pattern (site plus path with ids removed) is the
+        // document identity. It is title-grade information under the same
+        // permission as the title, and it is what tells invoicing apart from
+        // scheduling when both windows are just called "Jobber".
+        if docPath.isEmpty, AXReader.isTrusted, WorkflowUnit.isBrowser(bundleID: bundleID),
+           let url = AXReader.focusedBrowserURL(pid: pid) {
+            docPath = WorkflowUnit.pagePattern(url)
+        }
         inputMonitor.reset() // start counting fresh for this span
         openSpan = (bundleID, appName, rawTitle, now, docPath)
+    }
+
+    /// Turns a copy followed by a paste in a different context into a Transfer
+    /// row. Only ever sees actions the monitor let through, so excluded apps and
+    /// secure fields never appear here. Structure only: which window the data
+    /// left, which window and field it landed in.
+    private func noteTransfer(_ reason: String) {
+        guard let span = openSpan else { return }
+        let now = Date()
+        switch reason {
+        case "Copied", "Cut":
+            lastCopy = (now, span.bundleID, span.appName, span.title)
+        case "Pasted":
+            guard let c = lastCopy, now.timeIntervalSince(c.at) <= transferWindow else { return }
+            let sameContext = c.bundleID == span.bundleID && c.title == span.title
+            guard !sameContext else { return }   // a paste within the same window is editing, not a transfer
+            let t = Transfer(
+                at: now,
+                fromBundleID: c.bundleID, fromApp: c.app,
+                fromUnit: WorkflowUnit.label(app: c.app, title: c.title), fromTitle: c.title,
+                toBundleID: span.bundleID, toApp: span.appName,
+                toUnit: WorkflowUnit.label(app: span.appName, title: span.title), toTitle: span.title,
+                toField: currentFieldLabel,
+                gapSeconds: now.timeIntervalSince(c.at)
+            )
+            store.insert(transfer: t)
+            lastCopy = nil   // one copy feeds one transfer
+            onSpanSaved?()
+        default:
+            break
+        }
     }
 
     private func closeOpenSpan(end: Date? = nil) {
@@ -776,13 +845,17 @@ final class CaptureEngine: ObservableObject {
         onIdleRecorded?()
     }
 
+    /// Refreshes both model checks. Called on launch and whenever the Privacy
+    /// tab or the welcome sheet is shown, so the Local AI panel is never stale.
     func refreshInterpreterStatus() {
         Task { [weak self] in
             guard let self else { return }
-            let ready = await self.interpreter.isAvailable()
+            let vision = await self.interpreter.isAvailable()
+            let text = await self.interpreter.isTextAvailable()
             await MainActor.run {
-                self.interpreterReady = ready
-                if ready { self.drainNarration() } // model came back — process queued frames
+                self.interpreterReady = vision
+                self.textModelReady = text
+                if vision { self.drainNarration() } // model came back: process queued frames
             }
         }
     }
@@ -825,6 +898,23 @@ final class CaptureEngine: ObservableObject {
         }
         let rounded = total.rounded()
         if rounded != observedTodaySeconds { observedTodaySeconds = rounded }
+        publishLiveSpan()
+    }
+
+    /// Mirrors the open span into `liveSpan` for the UI, republished only when
+    /// a whole second has passed so views are not redrawn for nothing. Counts
+    /// are left at zero on purpose: draining the input monitor here would steal
+    /// them from the span that is about to be written.
+    private func publishLiveSpan() {
+        guard let span = openSpan else {
+            if liveSpan != nil { liveSpan = nil }
+            return
+        }
+        let now = Date()
+        guard now.timeIntervalSince(span.start) >= 1 else { return }
+        if let current = liveSpan, current.start == span.start, now.timeIntervalSince(current.end) < 1 { return }
+        liveSpan = ActivitySpan(bundleID: span.bundleID, appName: span.appName, windowTitle: span.title,
+                                start: span.start, end: now, isDemo: false, documentPath: span.docPath)
     }
 
     private func rolloverDayIfNeeded() {

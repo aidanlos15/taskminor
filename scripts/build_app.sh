@@ -17,13 +17,13 @@ BIN="$ROOT/.build/$CONFIG/Availeth"
 # requirement is fixed to the cert leaf + bundle id, unlike ad-hoc (whose cdhash
 # changes every build and invalidates grants). Falls back to ad-hoc if absent.
 # Create it once with scripts/make_signing_identity.sh.
-IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Availeth Self-Signed' | awk '{print $2}' | head -1)"
+IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Availeth Self-Signed' | awk '{print $2}' | head -1 || true)"   # || true: under set -e + pipefail a non-matching grep killed the script before the ad-hoc fallback below
 if [ -z "$IDENTITY" ]; then
   echo "warn: 'Availeth Self-Signed' identity not found — using ad-hoc (grants won't persist across rebuilds). Run scripts/make_signing_identity.sh."
   IDENTITY="-"
 fi
 
-echo "Assembling $APP…"
+echo "Assembling ${APP}…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Availeth"

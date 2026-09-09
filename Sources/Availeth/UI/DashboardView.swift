@@ -5,6 +5,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
     case story = "Story"
     case tasks = "Tasks"
     case workflows = "Workflows"
+    case transfers = "Data transfers"
     case logs = "Logs"
     case privacy = "Privacy"
 
@@ -17,6 +18,7 @@ enum DashboardSection: String, CaseIterable, Identifiable {
         case .story: return "text.alignleft"
         case .tasks: return "checklist"
         case .workflows: return "arrow.triangle.branch"
+        case .transfers: return "arrow.left.arrow.right"
         case .logs: return "line.3.horizontal"
         case .privacy: return "lock.shield"
         }
@@ -28,6 +30,9 @@ struct DashboardView: View {
     @State private var section: DashboardSection = .overview
     @State private var range: TimeRange = .week
     @State private var showWelcome = false
+    /// Re-read on a timer so the banner disappears the moment the grant lands.
+    @State private var axTrusted = AXReader.isTrusted
+    @State private var blindBannerDismissed = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -56,7 +61,7 @@ struct DashboardView: View {
             HStack(spacing: 11) {
                 LogoMark(size: 34)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Availeth").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.ink)
+                    Wordmark(size: 14)
                     Text("Process Discovery").microLabel().font(.system(size: 9))
                 }
             }
@@ -167,8 +172,44 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             topBar
             Rectangle().fill(Theme.line).frame(height: 1)
+            if showBlindBanner { blindBanner }
             detail
         }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            axTrusted = AXReader.isTrusted
+        }
+    }
+
+    /// Without window titles Availeth records app names and nothing else, which
+    /// looks like a working app producing useless output. The welcome sheet asks
+    /// once; if that was dismissed there was previously nothing to say so.
+    private var showBlindBanner: Bool {
+        !axTrusted && !blindBannerDismissed && section != .privacy
+    }
+
+    private var blindBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Availeth can only see which app you are in")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink)
+                Text("Window titles need the Accessibility permission. Without it, tasks and workflows cannot be told apart.")
+                    .font(.caption).foregroundStyle(Theme.ink2)
+            }
+            Spacer()
+            Button("Grant") {
+                AXReader.requestTrust()
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .controlSize(.small).buttonStyle(.borderedProminent).tint(Theme.amber)
+            Button { blindBannerDismissed = true } label: { Image(systemName: "xmark").font(.caption2) }
+                .buttonStyle(.plain).foregroundStyle(Theme.ink3)
+        }
+        .padding(.horizontal, 22).padding(.vertical, 9)
+        .background(Theme.amber.opacity(0.10))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
     }
 
     private var topBar: some View {
@@ -179,8 +220,20 @@ struct DashboardView: View {
                 .textCase(.uppercase).foregroundStyle(Theme.ink)
             Spacer()
             if section != .privacy {
-                SegControl(items: [("My activity", false), ("Demo", true)],
-                           selection: $state.showDemo, accent: true)
+                // While the sample dataset is on, say so plainly and give one
+                // way back. The toggle itself lives in the Privacy tab: a
+                // permanent switch here invited people to read a made-up
+                // finance department as their own work.
+                if state.showDemo {
+                    Button {
+                        state.showDemo = false
+                    } label: {
+                        Label("Viewing sample data", systemImage: "theatermasks.fill")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered).controlSize(.small).tint(Theme.accent)
+                    .help("You are looking at a sample finance dataset, not your own activity. Click to switch to My activity.")
+                }
                 SegControl(items: TimeRange.allCases.map { ($0.rawValue, $0) },
                            selection: $range)
             }
@@ -196,6 +249,7 @@ struct DashboardView: View {
         case .story: StoryView(range: range)
         case .tasks: TasksView(range: range)
         case .workflows: WorkflowsView(range: range)
+        case .transfers: TransfersView(range: range)
         case .logs: LogsView(range: range)
         case .privacy: PrivacyView()
         }

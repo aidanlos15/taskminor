@@ -9,9 +9,21 @@ import Foundation
 final class Synthesizer {
 
     struct Config {
-        var maxMinutesPerRun = 8
+        /// Minutes summarised per run. Most minutes are "thin" (windows and
+        /// typing only) and never reach the model, so a run of thirty costs a
+        /// few seconds; only minutes with fields, moved data or screen notes
+        /// wait on the model.
+        var maxMinutesPerRun = 60
         var taskGapSeconds: TimeInterval = 5 * 60
-        var maxTaskMinutes = 10
+        /// Hard ceiling so one unbroken sitting is not a single enormous card.
+        /// The model decides where a job ends; this only catches a runaway.
+        var maxTaskMinutes = 90
+        /// How many times per run the model is asked "same job or new?".
+        var maxBoundaryQuestionsPerRun = 8
+        /// A task must run this long before a context change can end it.
+        var minTaskMinutes = 3
+        /// Split when the apps in use turn over completely and stay turned over.
+        var splitOnContextChange = true
         /// Don't close a task whose last minute is newer than this (it may grow).
         var taskGraceSeconds: TimeInterval = 120
         /// A minute counts as "away" if idle covered at least this fraction of it.
@@ -37,16 +49,22 @@ final class Synthesizer {
     // MARK: - Orchestration (live data)
 
     /// Synthesizes any complete minutes since the last run, then groups closed
-    /// runs of minutes into tasks. Safe to call repeatedly; no-op if already busy
-    /// or the local model is unavailable.
+    /// runs of minutes into tasks. Safe to call repeatedly; no-op only if already
+    /// busy.
+    ///
+    /// It runs with or without a local model. `summarize` sends no image, so the
+    /// story layer needs the TEXT model, not the vision one. With no model at all
+    /// every minute still gets a deterministic line built from the captured
+    /// signals, because writing nothing leaves the user staring at an empty tab
+    /// with no way to tell that anything is wrong.
     func run(now: Date = Date()) async {
         guard !isRunning else { return }
-        guard await interpreter.isAvailable() else { return }
         isRunning = true
         defer { isRunning = false }
 
+        let modelReady = await interpreter.isTextAvailable()
         await synthesizeMinutes(now: now)
-        await groupTasks(now: now)
+        await groupTasks(now: now, modelReady: modelReady)
     }
 
     private func synthesizeMinutes(now: Date) async {
@@ -56,6 +74,20 @@ final class Synthesizer {
         let resumeFrom = store.latestMinuteStart(demo: false)?.addingTimeInterval(60)
             ?? Self.floorToMinute(now.addingTimeInterval(-firstRunLookback))
         var minute = Self.floorToMinute(resumeFrom)
+
+        // Skip forward over dead time instead of writing a placeholder row for
+        // every empty minute. On a fresh install the resume point is two hours
+        // back, and at 8 minutes a run that is about 22 minutes of walking
+        // through nothing before the first real minute is reached. Jump straight
+        // to the first captured activity.
+        if let firstActivity = store.spans(from: minute, to: currentMinute, demo: false).first {
+            minute = max(minute, Self.floorToMinute(firstActivity.start))
+        } else {
+            // Nothing captured in the whole window: settle at the current minute
+            // so the next run starts from now rather than two hours ago.
+            minute = currentMinute
+        }
+
         var processed = 0
 
         while minute < currentMinute && processed < config.maxMinutesPerRun {
@@ -64,17 +96,18 @@ final class Synthesizer {
             let spans = store.spans(from: minute, to: next, demo: false)
             let idle = store.idleSeconds(from: minute, to: next, demo: false)
 
-            if let ctx = Self.buildMinuteContext(minute: minute, narratives: narratives, spans: spans, idleSeconds: idle, idleFractionForAway: config.idleFractionForAway) {
+            let transfers = store.transfers(from: minute, to: next, demo: false)
+            if let ctx = Self.buildMinuteContext(minute: minute, narratives: narratives, spans: spans, transfers: transfers, idleSeconds: idle, idleFractionForAway: config.idleFractionForAway) {
                 if ctx.isAway {
                     // Settled immediately (task_id = -1) so it never groups into a
                     // task and never re-fetches as ungrouped.
                     store.insertMinuteSummary(ctx.summary(text: "Away from keyboard", taskID: -1))
-                } else if let text = await interpreter.summarize(prompt: ctx.prompt, maxTokens: 180) {
-                    store.insertMinuteSummary(ctx.summary(text: text))
                 } else {
-                    // Model failed — plain signal-derived line so the minute isn't
-                    // lost or endlessly retried (the UNIQUE index prevents dupes).
-                    store.insertMinuteSummary(ctx.summary(text: ctx.fallbackText))
+                    // A minute is a record, not a story: one true line built from
+                    // it (windows, typing, fields, data moved). The model is not
+                    // asked about minutes at all; it writes once a job has ended,
+                    // and it is the one that says when that is.
+                    store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(ctx.fallbackText)))
                 }
             } else {
                 // No activity this minute — record a settled placeholder so the
@@ -86,12 +119,27 @@ final class Synthesizer {
         }
     }
 
-    private func groupTasks(now: Date) async {
+    private func groupTasks(now: Date, modelReady: Bool) async {
         // Away/empty/noise minutes already carry task_id = -1, so the query only
         // returns real ungrouped work minutes.
         let minutes = store.ungroupedMinuteSummaries(demo: false)
         guard !minutes.isEmpty else { return }
-        let (closed, _) = Self.groupMinutes(minutes, now: now, config: config)
+        // The model decides where a job ends. At each point where the apps in
+        // use turn over it is shown the job so far and the minutes that follow
+        // and asked whether the same job continues. With no model, or no usable
+        // answer, a change that holds for the next minute ends the job.
+        var decisions: [Int64: Bool] = [:]
+        var grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+        var asked = 0
+        while let q = grouped.query, asked < config.maxBoundaryQuestionsPerRun {
+            asked += 1
+            decisions[q.key] = await judgeBoundary(q) ?? q.ruleSaysNew
+            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+        }
+        if grouped.query != nil {
+            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: false)
+        }
+        let closed = grouped.closed
         for group in closed {
             if Self.isTrivial(group) {
                 // Settle isolated noise (a single low-activity minute) without
@@ -99,9 +147,17 @@ final class Synthesizer {
                 store.settleMinutes(group.map(\.id))
                 continue
             }
-            guard let task = await makeTask(from: group) else { continue }
+            guard let task = await makeTask(from: group, modelReady: modelReady) else { continue }
             store.insertTaskAndLink(task, minuteIDs: group.map(\.id))
         }
+    }
+
+    /// Asks the model whether the job changed at a turnover point. nil when it
+    /// gives no usable answer, so the caller falls back to the rule.
+    private func judgeBoundary(_ q: BoundaryQuery) async -> Bool? {
+        let prompt = StoryWriter.boundaryPrompt(episode: q.episode, next: q.next)
+        guard let raw = await interpreter.summarize(prompt: prompt, maxTokens: 6, stop: ["\n"]) else { return nil }
+        return StoryWriter.parseBoundary(raw)
     }
 
     /// A closed group that isn't worth a task card: a single minute with little
@@ -111,13 +167,36 @@ final class Synthesizer {
         return (m.keystrokes + m.clicks) < 20 && m.sourceCount < 2
     }
 
-    private func makeTask(from group: [MinuteSummary]) async -> TaskSummary? {
+    private func makeTask(from group: [MinuteSummary], modelReady: Bool) async -> TaskSummary? {
         guard let first = group.first, let last = group.last else { return nil }
         let apps = Self.mergedApps(group)
-        let prompt = Self.taskPrompt(group: group, apps: apps)
-        let raw = await interpreter.summarize(prompt: prompt, maxTokens: 400)
-        let (title, story) = Self.parseTitleAndStory(raw, fallbackApps: apps, fallbackStory: "Worked across \(apps.joined(separator: ", ")).")
-        let automatable = Self.automatableAssessment(group)
+        let windowStart = first.minuteStart, windowEnd = last.minuteStart.addingTimeInterval(60)
+        let transferList = store.transfers(from: windowStart, to: windowEnd, demo: false)
+            .filter { $0.fromUnit != $0.toUnit }
+        let record = StoryWriter.taskRecord(minutes: group, transfers: transferList)
+        let raw = modelReady
+            ? await interpreter.summarize(prompt: StoryWriter.taskPrompt(record), maxTokens: 320, stop: StoryWriter.taskStops)
+            : nil
+        var (title, story) = StoryWriter.acceptTitleAndStory(raw, record: record)
+        story = NarrativeSanitizer.scrub(story)
+        if !modelReady { story += " Install the local text model for a written account." }
+        // How often has this shape of work been seen? A card is judged on the
+        // history of its own app set, not on the busyness of one sitting.
+        let signature = Set(apps.map { $0.lowercased() })
+        let history = store.taskSummaries(from: first.minuteStart.addingTimeInterval(-45 * 86400),
+                                          to: last.minuteStart, demo: false)
+            .filter { t in
+                let other = Set(t.apps.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
+                guard !other.isEmpty, !signature.isEmpty else { return false }
+                let overlap = Double(signature.intersection(other).count)
+                return overlap / Double(max(signature.count, other.count)) >= 0.6
+            }
+        let occurrences = history.count + 1
+        let days = TransferMiner.distinctDays(history.map(\.start) + [first.minuteStart])
+        let transfers = transferList.count
+        let durations = history.map(\.duration) + [windowEnd.timeIntervalSince(windowStart)]
+        let automatable = Self.automatableAssessment(group, occurrences: occurrences, daysObserved: days,
+                                                     transfers: transfers, durations: durations)
         return TaskSummary(
             start: first.minuteStart,
             end: last.minuteStart.addingTimeInterval(60),
@@ -149,27 +228,15 @@ final class Synthesizer {
         var sceneTexts: [String]
         var sourceCount: Int
         var isAway: Bool
+        /// The labelled record the model is shown and checked against.
+        var record: StoryWriter.MinuteRecord = .init()
 
-        var prompt: String {
-            var lines = [
-                "You are documenting ONE minute of an employee's work so a colleague could understand it and judge what could be automated.",
-                "Write 2–3 concrete sentences describing exactly what they did this minute. PRESERVE the specific details from the observations below — the exact screens/pages, form fields and their values, and any questions asked of AI tools. Do not generalise or drop specifics.",
-                "",
-                "Apps/tabs: \(apps.joined(separator: ", "))",
-            ]
-            if !sceneTexts.isEmpty { lines.append("Screen observations: \(sceneTexts.prefix(8).joined(separator: "; "))") }
-            if !shortcuts.isEmpty { lines.append("Shortcuts/keys: \(shortcuts)") }
-            if !fields.isEmpty { lines.append("Fields entered: \(fields)") }
-            lines.append("Typing: \(keystrokes) keystrokes, \(clicks) clicks.")
-            lines.append("\nDetailed account of this minute:")
-            return lines.joined(separator: "\n")
-        }
+        var prompt: String { StoryWriter.minutePrompt(record) }
 
-        var fallbackText: String {
-            let appPart = apps.prefix(3).joined(separator: ", ")
-            if !sceneTexts.isEmpty { return sceneTexts[0] }
-            return "Worked in \(appPart)."
-        }
+        /// What the minute reads as with no model, or when the model's entry
+        /// failed its checks: a screen note if there is one, else one true
+        /// sentence built from the record.
+        var fallbackText: String { sceneTexts.first ?? StoryWriter.plainEntry(record) }
 
         func summary(text: String, taskID: Int64 = 0) -> MinuteSummary {
             MinuteSummary(
@@ -184,7 +251,7 @@ final class Synthesizer {
 
     /// Fuses a minute's raw rows into a context object, or nil if the minute had
     /// no meaningful activity.
-    static func buildMinuteContext(minute: Date, narratives: [SceneNarrative], spans: [ActivitySpan], idleSeconds: TimeInterval, idleFractionForAway: Double) -> MinuteContext? {
+    static func buildMinuteContext(minute: Date, narratives: [SceneNarrative], spans: [ActivitySpan], transfers: [Transfer] = [], idleSeconds: TimeInterval, idleFractionForAway: Double) -> MinuteContext? {
         let awayDominant = idleSeconds >= 60 * idleFractionForAway
         let hasActivity = !spans.isEmpty || !narratives.isEmpty
         if !hasActivity && awayDominant {
@@ -215,28 +282,77 @@ final class Synthesizer {
         if awayDominant && keystrokes == 0 && clicks == 0 && sceneTexts.isEmpty {
             return MinuteContext(minute: minute, apps: apps, keystrokes: 0, clicks: 0, shortcuts: "", fields: "", sceneTexts: [], sourceCount: 0, isAway: true)
         }
-        return MinuteContext(minute: minute, apps: apps, keystrokes: keystrokes, clicks: clicks, shortcuts: shortcuts, fields: fields, sceneTexts: sceneTexts, sourceCount: narratives.count, isAway: false)
+        return MinuteContext(minute: minute, apps: apps, keystrokes: keystrokes, clicks: clicks, shortcuts: shortcuts, fields: fields, sceneTexts: sceneTexts, sourceCount: narratives.count, isAway: false,
+                             record: StoryWriter.minuteRecord(spans: spans, transfers: transfers, narratives: narratives))
     }
 
     // MARK: - Pure task grouping
 
     /// Groups consecutive same-task minutes. Returns closed groups (ready to
     /// summarize) and the trailing pending run (too recent to close yet).
+    /// A point where the apps in use turned over. The model is asked whether
+    /// the job changed there; `ruleSaysNew` is what the persistence rule would
+    /// decide on its own, used when there is no model or no usable answer.
+    struct BoundaryQuery: Equatable {
+        var key: Int64
+        var episode: [MinuteSummary]
+        var next: [MinuteSummary]
+        var ruleSaysNew: Bool
+    }
+
+    static func boundaryKey(_ m: MinuteSummary) -> Int64 { Int64(m.minuteStart.timeIntervalSince1970) }
+
+    /// Rules only: an idle gap, the ceiling, or a change of apps that holds.
     static func groupMinutes(_ minutes: [MinuteSummary], now: Date, config: Config) -> (closed: [[MinuteSummary]], pending: [MinuteSummary]) {
-        // Boundary is temporal, NOT app-based: a real workflow deliberately moves
-        // through different apps (Mail → Excel → ERP), so splitting on app change
-        // would shred exactly the cross-app tasks we most want to see. A task runs
-        // until an idle/away gap or the length cap.
+        let r = groupMinutes(minutes, now: now, config: config, decisions: [:], askJudge: false)
+        return (r.closed, r.pending)
+    }
+
+    /// A task ends at an idle gap, at the ceiling, or where the model says the
+    /// job changed. Splitting on a fixed clock produced "Code workflow" cards
+    /// that were really time buckets, and splitting on any single minute's app
+    /// change shreds genuine cross-app work, so a turnover is a question, not
+    /// an answer: with `askJudge` the walk stops at the first undecided turnover
+    /// and returns it as `query`; the caller decides and calls again. Without a
+    /// judge, a change that holds for the next minute too ends the job.
+    static func groupMinutes(_ minutes: [MinuteSummary], now: Date, config: Config, decisions: [Int64: Bool], askJudge: Bool) -> (closed: [[MinuteSummary]], pending: [MinuteSummary], query: BoundaryQuery?) {
         let sorted = minutes.sorted { $0.minuteStart < $1.minuteStart }
         var groups: [[MinuteSummary]] = []
         var current: [MinuteSummary] = []
 
-        for m in sorted {
+        func appSet(_ m: MinuteSummary) -> Set<String> {
+            Set(m.apps.split(separator: ",").compactMap {
+                let app = $0.trimmingCharacters(in: .whitespaces).components(separatedBy: " — ").first ?? ""
+                return app.isEmpty ? nil : app
+            })
+        }
+
+        for (i, m) in sorted.enumerated() {
             if current.isEmpty { current = [m]; continue }
             let prev = current.last!
             let gap = m.minuteStart.timeIntervalSince(prev.minuteStart.addingTimeInterval(60))
             let tooLong = current.count >= config.maxTaskMinutes
-            if gap > config.taskGapSeconds || tooLong {
+
+            // Turnover: nothing this minute overlaps what the job has been doing.
+            var turnedOver = false
+            if config.splitOnContextChange && current.count >= config.minTaskMinutes {
+                let running = current.suffix(3).reduce(into: Set<String>()) { $0.formUnion(appSet($1)) }
+                let here = appSet(m)
+                if !here.isEmpty && !running.isEmpty && here.isDisjoint(with: running) {
+                    let next = i + 1 < sorted.count ? appSet(sorted[i + 1]) : here
+                    let ruleSaysNew = next.isEmpty || !next.isDisjoint(with: here)
+                    if let decided = decisions[boundaryKey(m)] {
+                        turnedOver = decided
+                    } else if askJudge {
+                        let following = Array(sorted[i..<min(i + 3, sorted.count)])
+                        return ([], [], BoundaryQuery(key: boundaryKey(m), episode: current, next: following, ruleSaysNew: ruleSaysNew))
+                    } else {
+                        turnedOver = ruleSaysNew
+                    }
+                }
+            }
+
+            if gap > config.taskGapSeconds || tooLong || turnedOver {
                 groups.append(current)
                 current = [m]
             } else {
@@ -254,7 +370,58 @@ final class Synthesizer {
                 pending = closed.removeLast()
             }
         }
-        return (closed, pending)
+        return (closed, pending, nil)
+    }
+
+    /// A task story built from the captured signals alone, for when no local
+    /// model is available. Deliberately factual: how long, which apps, how much
+    /// typing, which shortcuts and fields. That is the material an automation
+    /// judgement is made from, so the tab is useful before any model is pulled.
+    static func signalStory(group: [MinuteSummary], apps: [String]) -> String {
+        let minutes = group.count
+        let keys = group.reduce(0) { $0 + $1.keystrokes }
+        let clicks = group.reduce(0) { $0 + $1.clicks }
+        let shortcuts = topTokens(group.map(\.shortcuts), limit: 4)
+        let fields = topTokens(group.map(\.fields), limit: 4)
+
+        var parts: [String] = []
+        let appPart = apps.isEmpty ? "this Mac" : apps.prefix(4).joined(separator: ", ")
+        parts.append("\(minutes) minute\(minutes == 1 ? "" : "s") across \(appPart).")
+        if keys > 0 || clicks > 0 {
+            var counts: [String] = []
+            if keys > 0 { counts.append("\(keys) keystroke\(keys == 1 ? "" : "s")") }
+            if clicks > 0 { counts.append("\(clicks) click\(clicks == 1 ? "" : "s")") }
+            parts.append(counts.joined(separator: " and ") + ".")
+        }
+        if !shortcuts.isEmpty { parts.append("Shortcuts used: \(shortcuts.joined(separator: ", ")).") }
+        if !fields.isEmpty { parts.append("Fields typed into: \(fields.joined(separator: ", ")).") }
+        parts.append("Pull a local text model for a written account of this task.")
+        return parts.joined(separator: " ")
+    }
+
+    /// Most frequent comma-separated tokens across a set of stored lists.
+    /// Shortcut tokens carry their own count ("⌘V×3"); those are merged by key
+    /// and the counts summed, so "↵×1" and "↵×3" read as "↵×4" rather than two
+    /// separate entries.
+    static func topTokens(_ lists: [String], limit: Int) -> [String] {
+        var counts: [String: Int] = [:]
+        var counted: Set<String> = []
+        for list in lists {
+            for token in list.split(separator: ",") {
+                let t = token.trimmingCharacters(in: .whitespaces)
+                guard !t.isEmpty else { continue }
+                if let x = t.lastIndex(of: "×"), let n = Int(t[t.index(after: x)...]) {
+                    let key = String(t[..<x])
+                    counts[key, default: 0] += n
+                    counted.insert(key)
+                } else {
+                    counts[t, default: 0] += 1
+                }
+            }
+        }
+        return counts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }
+            .prefix(limit)
+            .map { counted.contains($0.key) ? "\($0.key)×\($0.value)" : $0.key }
     }
 
     static func mergedApps(_ minutes: [MinuteSummary]) -> [String] {
@@ -273,7 +440,37 @@ final class Synthesizer {
 
     /// Reads the fused signals for automation potential. Copy/paste chains across
     /// apps and heavy repeated field entry score high; browsing/reading scores low.
-    static func automatableAssessment(_ minutes: [MinuteSummary]) -> String {
+    /// The Story card's automation line, from the same Verdict as the Workflows
+    /// tab. `daysObserved` and `occurrences` describe how often this shape of work
+    /// has been seen, so a single sitting can never read as "High".
+    static func automatableAssessment(_ minutes: [MinuteSummary], occurrences: Int, daysObserved: Int,
+                                      transfers: Int, durations: [TimeInterval]) -> String {
+        let shortcutsBlob = minutes.map(\.shortcuts).joined(separator: ", ")
+        var fieldRuns: [String: Int] = [:]
+        for m in minutes {
+            for raw in m.fields.split(separator: ",") {
+                if let f = Evidence.cleanField(String(raw)) { fieldRuns[f, default: 0] += 1 }
+            }
+        }
+        let keys = minutes.reduce(0) { $0 + $1.keystrokes }
+        let clicks = minutes.reduce(0) { $0 + $1.clicks }
+        let seconds = Double(minutes.count) * 60
+        let evidence = Evidence(
+            occurrences: occurrences,
+            daysObserved: daysObserved,
+            durations: durations,
+            transfers: transfers > 0 ? transfers : countOccurrences(of: ["⌘V"], in: shortcutsBlob),
+            consistentFields: fieldRuns.keys.sorted(),
+            keystrokes: keys, clicks: clicks,
+            switches: max(0, mergedApps(minutes).count - 1),
+            readingSeconds: Double(minutes.filter { $0.keystrokes == 0 && $0.clicks == 0 && $0.shortcuts.isEmpty }.count) * 60,
+            totalSeconds: seconds
+        )
+        return Verdict.assess(evidence).display
+    }
+
+    /// Kept for the old single-slice call shape used by tests of the raw scoring.
+    static func legacyAutomatableAssessment(_ minutes: [MinuteSummary]) -> String {
         let shortcutsBlob = minutes.map(\.shortcuts).joined(separator: ", ")
         let copyPaste = countOccurrences(of: ["⌘C", "⌘V"], in: shortcutsBlob)
         let tabs = countOccurrences(of: ["Tab"], in: shortcutsBlob)
@@ -329,23 +526,8 @@ final class Synthesizer {
         return out.prefix(8).joined(separator: ", ")
     }
 
-    static func taskPrompt(group: [MinuteSummary], apps: [String]) -> String {
-        let steps = group.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
-        return """
-        These are consecutive minutes of one task an employee performed. Write a detailed account (4–6 sentences) of what they actually did, step by step, and the systems and data involved, so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
-
-        Apps involved: \(apps.joined(separator: ", "))
-        Minute-by-minute:
-        \(steps)
-
-        Reply EXACTLY in this format:
-        TITLE: <short title>
-        STORY: <4-6 detailed sentences preserving the specifics>
-        """
-    }
-
     static func parseTitleAndStory(_ raw: String?, fallbackApps: [String], fallbackStory: String? = nil) -> (title: String, story: String) {
-        let fallbackTitle = (fallbackApps.first ?? "Work") + " workflow"
+        let fallbackTitle = StoryWriter.plainTitle(apps: fallbackApps)
         let fbStory = fallbackStory ?? "Worked across \(fallbackApps.joined(separator: ", "))."
         guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (fallbackTitle, fbStory)
