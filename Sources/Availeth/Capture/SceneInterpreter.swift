@@ -244,9 +244,25 @@ final class OllamaInterpreter: NSObject, SceneInterpreter, URLSessionTaskDelegat
             return nil
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A small model sometimes hands the grounding line back instead of a
+        // description. That is not a screen read, so keep nothing.
+        if Self.isPromptEcho(trimmed, context: context) { return nil }
         // Detailed mode intentionally keeps on-screen content; activity mode scrubs PII.
         let cleaned = context.depth == .detailed ? trimmed : NarrativeSanitizer.scrub(trimmed)
         return cleaned.isEmpty ? nil : cleaned
+    }
+
+    /// True when the reply is the "App: X. Window: Y. The user just: Z." line
+    /// from the prompt, or a rewording of it with nothing added.
+    static func isPromptEcho(_ reply: String, context: SceneContext) -> Bool {
+        let r = reply.lowercased()
+        if r.hasPrefix("app:") || r.contains("the user just:") { return true }
+        var stripped = r
+        for piece in [context.appName, context.windowTitle, context.action, "the user just", "switched to", "app", "window", "user"] where !piece.isEmpty {
+            stripped = stripped.replacingOccurrences(of: piece.lowercased(), with: " ")
+        }
+        let words = stripped.split { !$0.isLetter }.filter { $0.count > 2 }
+        return words.count < 3
     }
 
     func summarize(prompt: String, maxTokens: Int) async -> String? {
