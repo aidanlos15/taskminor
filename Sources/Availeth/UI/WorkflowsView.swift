@@ -39,7 +39,7 @@ struct WorkflowsView: View {
         .onChange(of: state.dataVersion) { reload() }
         .sheet(item: $selected) { insight in
             WorkflowDetailView(insight: insight, hourlyRate: state.hourlyRate,
-                               storylineOn: state.engine.screenshotMode == .storyline)
+                               coverage: state.coverage)
         }
     }
 

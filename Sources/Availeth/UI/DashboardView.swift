@@ -30,9 +30,9 @@ struct DashboardView: View {
     @State private var section: DashboardSection = .overview
     @State private var range: TimeRange = .week
     @State private var showWelcome = false
-    /// Re-read on a timer so the banner disappears the moment the grant lands.
-    @State private var axTrusted = AXReader.isTrusted
-    @State private var blindBannerDismissed = false
+    /// Gap ids the person has waved away this session. Keyed by gap, so a new
+    /// problem still speaks up after an old one was dismissed.
+    @State private var dismissedGaps: Set<String> = []
 
     var body: some View {
         HStack(spacing: 0) {
@@ -52,6 +52,12 @@ struct DashboardView: View {
             if state.welcomeRequested { showWelcome = true; state.welcomeRequested = false }
         }
         .sheet(isPresented: $showWelcome) { WelcomeSheet() }
+        .onChange(of: state.requestedSection) {
+            if let wanted = state.requestedSection {
+                section = wanted
+                state.requestedSection = nil
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -172,39 +178,39 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             topBar
             Rectangle().fill(Theme.line).frame(height: 1)
-            if showBlindBanner { blindBanner }
+            if let gap = topGap { coverageBanner(gap) }
             detail
         }
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            axTrusted = AXReader.isTrusted
-        }
     }
 
-    /// Without window titles Availeth records app names and nothing else, which
-    /// looks like a working app producing useless output. The welcome sheet asks
-    /// once; if that was dismissed there was previously nothing to say so.
-    private var showBlindBanner: Bool {
-        !axTrusted && !blindBannerDismissed && section != .privacy
+    /// The first thing that is missing, if anything is. The Privacy tab already
+    /// lists all of them, so the banner stands down there.
+    private var topGap: CoverageGap? {
+        guard section != .privacy else { return nil }
+        return state.coverage.gaps.first { !dismissedGaps.contains($0.id) }
     }
 
-    private var blindBanner: some View {
+    /// One line saying what Availeth cannot see, and one button that fixes it.
+    /// Without this the app looked like it was working and quietly recorded
+    /// nothing.
+    private func coverageBanner(_ gap: CoverageGap) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.amber)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Availeth can only see which app you are in")
+                Text(gap.title)
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink)
-                Text("Window titles need the Accessibility permission. Without it, tasks and workflows cannot be told apart.")
+                Text(gap.detail)
                     .font(.caption).foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            Button("Grant") {
-                AXReader.requestTrust()
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                    NSWorkspace.shared.open(url)
-                }
+            if state.coverage.gaps.count > 1 {
+                Text("\(state.coverage.gaps.count - 1) more to fix")
+                    .font(.caption).foregroundStyle(Theme.ink3)
             }
-            .controlSize(.small).buttonStyle(.borderedProminent).tint(Theme.amber)
-            Button { blindBannerDismissed = true } label: { Image(systemName: "xmark").font(.caption2) }
+            Button(gap.action) { gap.fix.run(state) }
+                .controlSize(.small).buttonStyle(.borderedProminent).tint(Theme.amber)
+            Button { dismissedGaps.insert(gap.id) } label: { Image(systemName: "xmark").font(.caption2) }
                 .buttonStyle(.plain).foregroundStyle(Theme.ink3)
         }
         .padding(.horizontal, 22).padding(.vertical, 9)

@@ -103,10 +103,12 @@ final class Synthesizer {
                     // task and never re-fetches as ungrouped.
                     store.insertMinuteSummary(ctx.summary(text: "Away from keyboard", taskID: -1))
                 } else {
-                    // A minute is a record, not a story: one true line built from
-                    // it (windows, typing, fields, data moved). The model is not
-                    // asked about minutes at all; it writes once a job has ended,
-                    // and it is the one that says when that is.
+                    // A minute is a record, not a story: one true line built
+                    // from it (windows, typing, fields, data moved). The model
+                    // is never asked about a minute. With a screen narrative
+                    // the note from the screen is used; with none, the line is
+                    // built from the record, so nothing is invented from a
+                    // window title.
                     store.insertMinuteSummary(ctx.summary(text: NarrativeSanitizer.scrub(ctx.fallbackText)))
                 }
             } else {
@@ -124,17 +126,21 @@ final class Synthesizer {
         // returns real ungrouped work minutes.
         let minutes = store.ungroupedMinuteSummaries(demo: false)
         guard !minutes.isEmpty else { return }
+        // With no screen narratives the model is judging window titles alone,
+        // and it guesses. The rule is the better answer then.
+        let askJudge = Self.mayWriteProse(modelReady: modelReady,
+                                          sceneNarratives: sceneNarrativeCount(minutes: minutes))
         // The model decides where a job ends. At each point where the apps in
         // use turn over it is shown the job so far and the minutes that follow
         // and asked whether the same job continues. With no model, or no usable
         // answer, a change that holds for the next minute ends the job.
         var decisions: [Int64: Bool] = [:]
-        var grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+        var grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: askJudge)
         var asked = 0
         while let q = grouped.query, asked < config.maxBoundaryQuestionsPerRun {
             asked += 1
             decisions[q.key] = await judgeBoundary(q) ?? q.ruleSaysNew
-            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: modelReady)
+            grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: askJudge)
         }
         if grouped.query != nil {
             grouped = Self.groupMinutes(minutes, now: now, config: config, decisions: decisions, askJudge: false)
@@ -150,6 +156,21 @@ final class Synthesizer {
             guard let task = await makeTask(from: group, modelReady: modelReady) else { continue }
             store.insertTaskAndLink(task, minuteIDs: group.map(\.id))
         }
+    }
+
+    /// The model may write prose only when the screen was actually described.
+    /// From window titles and four counts a small model invents a purpose that
+    /// was never there, so with no scene narratives the story stays factual and
+    /// the boundary rule decides on its own.
+    static func mayWriteProse(modelReady: Bool, sceneNarratives: Int) -> Bool {
+        modelReady && sceneNarratives > 0
+    }
+
+    /// How many screen narratives sit under this run of minutes.
+    private func sceneNarrativeCount(minutes: [MinuteSummary]) -> Int {
+        guard let first = minutes.map(\.minuteStart).min(),
+              let last = minutes.map(\.minuteStart).max() else { return 0 }
+        return store.narratives(from: first, to: last.addingTimeInterval(60), demo: false).count
     }
 
     /// Asks the model whether the job changed at a turnover point. nil when it
@@ -174,7 +195,12 @@ final class Synthesizer {
         let transferList = store.transfers(from: windowStart, to: windowEnd, demo: false)
             .filter { $0.fromUnit != $0.toUnit }
         let record = StoryWriter.taskRecord(minutes: group, transfers: transferList)
-        let raw = modelReady
+        // Nothing was captured of the screen for this task, so there is nothing
+        // to write from but window titles. Asking a small model for prose there
+        // produces invented purpose, so the card stays factual.
+        let mayWrite = Self.mayWriteProse(modelReady: modelReady,
+                                          sceneNarratives: store.narratives(from: windowStart, to: windowEnd, demo: false).count)
+        let raw = mayWrite
             ? await interpreter.summarize(prompt: StoryWriter.taskPrompt(record), maxTokens: 320, stop: StoryWriter.taskStops)
             : nil
         var (title, story) = StoryWriter.acceptTitleAndStory(raw, record: record)
@@ -186,7 +212,7 @@ final class Synthesizer {
         let history = store.taskSummaries(from: first.minuteStart.addingTimeInterval(-45 * 86400),
                                           to: last.minuteStart, demo: false)
             .filter { t in
-                let other = Set(t.apps.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() })
+                let other = Set(AppList.appNames(t.apps).map { $0.lowercased() })
                 guard !other.isEmpty, !signature.isEmpty else { return false }
                 let overlap = Double(signature.intersection(other).count)
                 return overlap / Double(max(signature.count, other.count)) >= 0.6
@@ -202,6 +228,8 @@ final class Synthesizer {
             end: last.minuteStart.addingTimeInterval(60),
             title: title,
             text: story,
+            // Task level holds app names only, never titles, so a comma is
+            // safe here and the Story tab reads it as it always has.
             apps: apps.joined(separator: ", "),
             minuteCount: group.count,
             automatable: automatable
@@ -241,7 +269,7 @@ final class Synthesizer {
         func summary(text: String, taskID: Int64 = 0) -> MinuteSummary {
             MinuteSummary(
                 minuteStart: minute, text: text,
-                apps: apps.joined(separator: ", "),
+                apps: AppList.join(apps),
                 keystrokes: keystrokes, clicks: clicks,
                 shortcuts: shortcuts, fields: fields,
                 sourceCount: sourceCount, taskID: taskID, isDemo: false
@@ -321,10 +349,7 @@ final class Synthesizer {
         var current: [MinuteSummary] = []
 
         func appSet(_ m: MinuteSummary) -> Set<String> {
-            Set(m.apps.split(separator: ",").compactMap {
-                let app = $0.trimmingCharacters(in: .whitespaces).components(separatedBy: " — ").first ?? ""
-                return app.isEmpty ? nil : app
-            })
+            Set(AppList.appNames(m.apps))
         }
 
         for (i, m) in sorted.enumerated() {
@@ -427,10 +452,10 @@ final class Synthesizer {
     static func mergedApps(_ minutes: [MinuteSummary]) -> [String] {
         var seen = Set<String>(), out: [String] = []
         for m in minutes {
-            // Use the app name (before the em dash) for a compact task-level list.
-            for token in m.apps.split(separator: ",") {
-                let app = token.trimmingCharacters(in: .whitespaces).components(separatedBy: " — ").first ?? ""
-                if !app.isEmpty && !seen.contains(app) { seen.insert(app); out.append(app) }
+            // The app name alone (the part before the dash) makes a compact
+            // task-level list.
+            for app in AppList.appNames(m.apps) where !seen.contains(app) {
+                seen.insert(app); out.append(app)
             }
         }
         return out

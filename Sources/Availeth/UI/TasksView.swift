@@ -170,8 +170,11 @@ struct TasksView: View {
                 }
             }
             if task.moments.isEmpty {
-                Text("No screen content was captured for this task. Turn on screen capture in the Privacy tab to record what each task involves.")
+                // The reason has to be the real one. This used to say "turn on
+                // screen capture" to people who already had it on.
+                Text(state.coverage.noScreenDetailReason)
                     .font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(12)

@@ -356,7 +356,8 @@ final class CaptureEngine: ObservableObject {
             inputMonitor.setField(label: "", secure: false, className: nil)
             return
         }
-        let label = (info.isTextInput && !info.isSecure) ? info.label : ""
+        let usable = info.isTextInput && !info.isSecure && FieldClassifier.isUsableLabel(info.label)
+        let label = usable ? info.label : ""
         let className = (deep && !label.isEmpty) ? FieldClassifier.classify(label) : nil
         currentFieldLabel = label
         inputMonitor.setField(label: label, secure: info.isSecure, className: className)

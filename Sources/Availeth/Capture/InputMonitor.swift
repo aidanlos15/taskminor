@@ -232,6 +232,36 @@ final class InputMonitor {
 /// Matches whole words (or explicit multi-word phrases) so short tokens like
 /// "id"/"no" don't fire on "Hidden"/"Notes".
 enum FieldClassifier {
+
+    /// True when a captured label reads like a real field label.
+    ///
+    /// The accessibility API hands back whatever the app puts on the element,
+    /// and plenty of it is not a label at all. Real junk that used to be stored
+    /// as fields: "5", "2", "example.com", "https://commandcentre.availeth.io/"
+    /// and "Twitter...". A label must have at least two letters, must not be a
+    /// web address, and must not be cut-off screen text.
+    static func isUsableLabel(_ raw: String) -> Bool {
+        let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.count <= 60 else { return false }
+        // Cut-off text from the screen, not a label.
+        if t.hasSuffix("…") || t.hasSuffix("...") { return false }
+        if looksLikeWebAddress(t) { return false }
+        // Two letters at least, so numbers and single letters are out.
+        return t.filter(\.isLetter).count >= 2
+    }
+
+    /// A URL or a bare domain such as "example.com".
+    static func looksLikeWebAddress(_ s: String) -> Bool {
+        let lower = s.lowercased()
+        if lower.contains("://") || lower.hasPrefix("www.") { return true }
+        guard !lower.contains(" "), lower.contains(".") else { return false }
+        let host = lower.split(separator: "/").first.map(String.init) ?? lower
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2, let tld = parts.last else { return false }
+        return tld.count >= 2 && tld.count <= 24 && tld.allSatisfy(\.isLetter)
+            && parts.dropLast().allSatisfy { !$0.isEmpty }
+    }
+
     static func classify(_ label: String) -> String? {
         let lower = label.lowercased()
         let words = Set(lower.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init))

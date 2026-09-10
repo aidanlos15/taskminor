@@ -292,9 +292,7 @@ enum StoryWriter {
         for m in minutes {
             keystrokes += m.keystrokes; clicks += m.clicks
             var seenThisMinute = Set<String>()
-            for token in m.apps.split(separator: ",") {
-                let label = token.trimmingCharacters(in: .whitespaces)
-                guard !label.isEmpty else { continue }
+            for label in AppList.parse(m.apps) {
                 let parts = label.components(separatedBy: " — ")
                 let app = parts[0]
                 let title = parts.count > 1 ? shortTitle(parts[1...].joined(separator: " — "), app: app) : ""

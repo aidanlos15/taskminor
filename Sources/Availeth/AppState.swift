@@ -25,6 +25,31 @@ final class AppState: ObservableObject {
     /// Set to true to reopen the first-run welcome/permissions sheet.
     @Published var welcomeRequested = false
 
+    // MARK: - Coverage
+
+    /// What Availeth can and cannot see right now. Refreshed on a timer so a
+    /// permission grant or a finished model download clears the banner without
+    /// a restart. Every message about thin data reads from this one value.
+    @Published private(set) var coverage = CoverageStatus()
+
+    /// Set by a banner or a link to move the dashboard to another tab.
+    @Published var requestedSection: DashboardSection?
+
+    /// Set alongside `requestedSection` to scroll the Privacy tab to Local AI.
+    @Published var focusLocalAI = false
+
+    /// Sends the window to the Privacy tab, optionally at the Local AI panel.
+    func showPrivacy(focusLocalAI: Bool = false) {
+        self.focusLocalAI = focusLocalAI
+        requestedSection = .privacy
+    }
+
+    /// Re-reads permissions, capture settings and model availability.
+    func refreshCoverage() {
+        let next = CoverageStatus.read(engine: engine)
+        if next != coverage { coverage = next }
+    }
+
     /// True → dashboard shows the bundled demo dataset; false → live capture.
     @Published var showDemo: Bool {
         didSet { UserDefaults.standard.set(showDemo, forKey: "availeth.showDemo") }
@@ -55,6 +80,7 @@ final class AppState: ObservableObject {
 
     private var cancellables: Set<AnyCancellable> = []
     private var synthTimer: Timer?
+    private var coverageTimer: Timer?
 
     private init() {
         let store = Store(url: Store.defaultURL())
@@ -147,6 +173,13 @@ final class AppState: ObservableObject {
         RunLoop.main.add(t, forMode: .common)
         synthTimer = t
         runSynthesis()
+
+        // Keep the coverage picture current: permissions are granted outside the
+        // app, and a model download finishes on its own clock.
+        refreshCoverage()
+        let c = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refreshCoverage() }
+        RunLoop.main.add(c, forMode: .common)
+        coverageTimer = c
     }
 
     private func runSynthesis() {

@@ -189,6 +189,9 @@ extension Evidence {
         var t = raw.trimmingCharacters(in: .whitespaces)
         if let b = t.firstIndex(of: "[") { t = String(t[..<b]).trimmingCharacters(in: .whitespaces) }
         guard t.count >= 2, t.count <= 40 else { return nil }
+        // Numbers, web addresses and cut-off screen text are not field labels.
+        // Old rows hold plenty of them, so they are dropped on the way out too.
+        guard FieldClassifier.isUsableLabel(t) else { return nil }
         let lower = t.lowercased()
         let chrome = ["search", "search or enter website name", "address and search bar", "enter your email", "save as:", "search apps", "find", "filter"]
         if chrome.contains(where: { lower == $0 || lower.hasPrefix($0 + " ") }) { return nil }

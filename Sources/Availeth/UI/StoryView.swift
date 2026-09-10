@@ -126,7 +126,7 @@ struct TaskCard: View {
 
                 if !task.apps.isEmpty {
                     HStack(spacing: 6) {
-                        ForEach(task.apps.components(separatedBy: ", ").prefix(6), id: \.self) { app in
+                        ForEach(AppList.appNames(task.apps).prefix(6), id: \.self) { app in
                             AppChip(name: app)
                         }
                     }

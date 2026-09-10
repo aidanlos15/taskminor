@@ -6,9 +6,9 @@ struct WorkflowDetailView: View {
     @Environment(\.dismiss) private var dismiss
     var insight: WorkflowInsight
     var hourlyRate: Double
-    /// Whether Storyline capture is currently enabled — so an empty walkthrough
-    /// shows the right message (it's on but nothing landed yet, vs. it's off).
-    var storylineOn: Bool = false
+    /// What the app can and cannot see, so an empty walkthrough gives the real
+    /// reason instead of telling people to turn on something already on.
+    var coverage: CoverageStatus = CoverageStatus()
 
     private var pattern: WorkflowPattern { insight.pattern }
 
@@ -133,7 +133,7 @@ struct WorkflowDetailView: View {
                                     .textSelection(.enabled)
                                     .padding(.top, 1)
                             } else {
-                                Text("(no screen detail captured for this step)")
+                                Text(coverage.noScreenDetailShort)
                                     .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                             }
                         }
@@ -193,17 +193,17 @@ struct WorkflowDetailView: View {
 
     private var noStorylineCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if storylineOn {
+            if coverage.screenReadingWorking {
                 Label("No screen detail for these runs yet", systemImage: "clock.arrow.circlepath")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Theme.ink)
                 Text("Screen capture is on, but no captures are attached to these runs of the workflow. Either they happened before you turned it on, or they were too brief to sample. It fills in as the workflow recurs from here.")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
             } else {
-                Label("Turn on Storyline for screenshots", systemImage: "camera.viewfinder")
+                Label("No screen detail was recorded", systemImage: "camera.viewfinder")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text("This workflow was found from app and window activity alone. Turn on screen capture in the Privacy tab and the next runs will include a screen-by-screen walkthrough of what happened.")
+                Text("This workflow was found from app and window activity alone. " + coverage.noScreenDetailReason)
                     .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
             }
         }

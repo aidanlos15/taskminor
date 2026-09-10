@@ -31,12 +31,14 @@ struct PrivacyView: View {
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 16) {
                 statusCard
+                coverageCard
                 windowTitlesCard
                 capabilitiesCard
-                localAICard
+                localAICard.id(Self.localAIAnchor)
                 exclusionsCard
                 dataCard
                 sampleDataCard
@@ -45,6 +47,16 @@ struct PrivacyView: View {
             .padding(20)
         }
         .scrollContentBackground(.hidden)
+        .onAppear {
+            // A banner elsewhere in the app can send someone straight here to
+            // install a model; land them on that panel, not at the top.
+            if state.focusLocalAI {
+                state.focusLocalAI = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation { proxy.scrollTo(Self.localAIAnchor, anchor: .top) }
+                }
+            }
+        }
         .onAppear {
             launchAtLogin = state.launchAtLoginEnabled
             refreshDataCounts()
@@ -60,6 +72,47 @@ struct PrivacyView: View {
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+        }
+    }
+
+    /// Scroll target for the Local AI panel.
+    private static let localAIAnchor = "availeth.privacy.localAI"
+
+    // MARK: - Coverage
+
+    /// Six plain facts about what Availeth can see. When findings look thin this
+    /// is the page that says why, without anyone having to guess.
+    private var coverageCard: some View {
+        Card(title: "Coverage", subtitle: "What Availeth can see right now") {
+            Text(coverageSummary)
+                .font(.caption).foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 0) {
+                ForEach(Array(state.coverage.facts.enumerated()), id: \.element.id) { index, fact in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: fact.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(fact.ok ? Theme.good : Theme.amber)
+                        Text(fact.label)
+                            .font(.system(size: 12.5, weight: .medium)).foregroundStyle(Theme.ink)
+                            .frame(width: 190, alignment: .leading)
+                        Text(fact.detail)
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 6)
+                    if index < state.coverage.facts.count - 1 { hairline }
+                }
+            }
+        }
+    }
+
+    private var coverageSummary: String {
+        let gaps = state.coverage.gaps
+        if gaps.isEmpty { return "Everything Availeth needs is in place." }
+        if gaps.count == 1 { return "One thing is missing. " + gaps[0].title + "." }
+        return "\(gaps.count) things are missing. First: " + gaps[0].title + "."
     }
 
     private func refreshDataCounts() {
