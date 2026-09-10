@@ -23,6 +23,15 @@ struct TransfersView: View {
         var lastSeen: Date
         var medianGap: TimeInterval
         var days: Int
+        /// Text of the most recent paste on this route, "" if none was captured.
+        var lastPayload: String
+    }
+
+    /// One line of pasted text, trimmed of line breaks and cut to 120 characters.
+    private static func oneLine(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return flat.count > 120 ? String(flat.prefix(120)) + "…" : flat
     }
 
     private var routes: [Route] {
@@ -33,10 +42,12 @@ struct TransfersView: View {
             var fieldCounts: [String: Int] = [:]
             for t in ts { if let f = Evidence.cleanField(t.toField) { fieldCounts[f, default: 0] += 1 } }
             let fields = fieldCounts.sorted { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }.prefix(4).map(\.key)
+            let newest = ts.max { $0.at < $1.at }
             return Route(from: ts[0].fromUnit, to: ts[0].toUnit, count: ts.count, fields: fields,
                          lastSeen: ts.map(\.at).max() ?? .distantPast,
                          medianGap: sorted.isEmpty ? 0 : sorted[sorted.count / 2],
-                         days: TransferMiner.distinctDays(ts.map(\.at)))
+                         days: TransferMiner.distinctDays(ts.map(\.at)),
+                         lastPayload: newest?.payload ?? "")
         }
         .sorted { $0.count == $1.count ? $0.lastSeen > $1.lastSeen : $0.count > $1.count }
     }
@@ -49,6 +60,7 @@ struct TransfersView: View {
                 || $0.fromTitle.localizedCaseInsensitiveContains(search)
                 || $0.toTitle.localizedCaseInsensitiveContains(search)
                 || $0.toField.localizedCaseInsensitiveContains(search)
+                || $0.payload.localizedCaseInsensitiveContains(search)
         }
     }
 
@@ -139,6 +151,13 @@ struct TransfersView: View {
                 } else {
                     Text("pasted into the page or editor, not a named field").font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
                 }
+                if !r.lastPayload.isEmpty {
+                    Text(Self.oneLine(r.lastPayload))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                        .help(r.lastPayload)
+                }
                 Text("\(r.days) day\(r.days == 1 ? "" : "s") · about \(Int(r.medianGap))s from copy to paste · last \(r.lastSeen.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2).foregroundStyle(Theme.ink3)
             }
@@ -204,6 +223,13 @@ struct TransfersView: View {
                         Text("into \(f)").font(.caption2).foregroundStyle(Theme.ink2)
                     }
                     Text("\(Int(t.gapSeconds))s between copy and paste").font(.caption2).foregroundStyle(Theme.ink3)
+                }
+                if !t.payload.isEmpty {
+                    Text(Self.oneLine(t.payload))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                        .help(t.payload)
                 }
             }
             Spacer()

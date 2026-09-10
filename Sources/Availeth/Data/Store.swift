@@ -58,7 +58,8 @@ final class Store {
         addColumnIfMissing(table: "spans", column: "shortcuts", decl: "TEXT NOT NULL DEFAULT ''")
         addColumnIfMissing(table: "spans", column: "fields", decl: "TEXT NOT NULL DEFAULT ''")
 
-        // Cross-context copy-and-paste movements. Structure only, never content.
+        // Cross-context copy-and-paste movements. Structure plus the text that
+        // was pasted, kept verbatim in the payload column.
         exec("""
             CREATE TABLE IF NOT EXISTS transfers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,10 +74,12 @@ final class Store {
                 to_title TEXT NOT NULL DEFAULT '',
                 to_field TEXT NOT NULL DEFAULT '',
                 gap REAL NOT NULL DEFAULT 0,
+                payload TEXT NOT NULL DEFAULT '',
                 is_demo INTEGER NOT NULL DEFAULT 0
             );
             """)
         exec("CREATE INDEX IF NOT EXISTS idx_transfers_at ON transfers(at);")
+        addColumnIfMissing(table: "transfers", column: "payload", decl: "TEXT NOT NULL DEFAULT ''")
 
         exec("""
             CREATE TABLE IF NOT EXISTS screenshots (
@@ -248,7 +251,7 @@ final class Store {
     func insert(transfer t: Transfer) -> Int64 {
         queue.sync {
             var stmt: OpaquePointer?
-            let sql = "INSERT INTO transfers (at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);"
+            let sql = "INSERT INTO transfers (at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap, payload, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?);"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, t.at.timeIntervalSince1970)
@@ -262,7 +265,8 @@ final class Store {
             sqlite3_bind_text(stmt, 9, t.toTitle, -1, Store.SQLITE_TRANSIENT)
             sqlite3_bind_text(stmt, 10, t.toField, -1, Store.SQLITE_TRANSIENT)
             sqlite3_bind_double(stmt, 11, t.gapSeconds)
-            sqlite3_bind_int(stmt, 12, t.isDemo ? 1 : 0)
+            sqlite3_bind_text(stmt, 12, String(t.payload.prefix(4000)), -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 13, t.isDemo ? 1 : 0)
             guard sqlite3_step(stmt) == SQLITE_DONE else { return 0 }
             return sqlite3_last_insert_rowid(db)
         }
@@ -272,7 +276,7 @@ final class Store {
         queue.sync {
             var out: [Transfer] = []
             var stmt: OpaquePointer?
-            let sql = "SELECT id, at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap FROM transfers WHERE at >= ? AND at < ? AND is_demo = ? ORDER BY at ASC;"
+            let sql = "SELECT id, at, from_bundle, from_app, from_unit, from_title, to_bundle, to_app, to_unit, to_title, to_field, gap, payload FROM transfers WHERE at >= ? AND at < ? AND is_demo = ? ORDER BY at ASC;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
@@ -285,7 +289,7 @@ final class Store {
                     at: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
                     fromBundleID: str(2), fromApp: str(3), fromUnit: str(4), fromTitle: str(5),
                     toBundleID: str(6), toApp: str(7), toUnit: str(8), toTitle: str(9), toField: str(10),
-                    gapSeconds: sqlite3_column_double(stmt, 11), isDemo: demo
+                    gapSeconds: sqlite3_column_double(stmt, 11), payload: str(12), isDemo: demo
                 ))
             }
             return out

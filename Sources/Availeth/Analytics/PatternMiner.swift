@@ -105,6 +105,7 @@ enum PatternMiner {
                 medianDuration: median,
                 totalDuration: total,
                 daysObserved: days,
+                daysSeen: TransferMiner.distinctDays(cand.instances.map(\.window.start)),
                 automationScore: score(apps: cand.apps, durations: durations),
                 sampleTitles: titles,
                 windows: cand.instances.map(\.window).sorted { $0.start < $1.start },

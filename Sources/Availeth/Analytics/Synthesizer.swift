@@ -194,18 +194,23 @@ final class Synthesizer {
         let windowStart = first.minuteStart, windowEnd = last.minuteStart.addingTimeInterval(60)
         let transferList = store.transfers(from: windowStart, to: windowEnd, demo: false)
             .filter { $0.fromUnit != $0.toUnit }
-        let record = StoryWriter.taskRecord(minutes: group, transfers: transferList)
+        // What the screen showed during this window. These are the only rows
+        // that say what the work actually was, so they feed both the prompt and
+        // the plain story - without them a card reads as app names and typing
+        // volume and nothing more.
+        let taskNarratives = store.narratives(from: windowStart, to: windowEnd, demo: false)
+        let record = StoryWriter.taskRecord(minutes: group, transfers: transferList, narratives: taskNarratives)
         // Nothing was captured of the screen for this task, so there is nothing
         // to write from but window titles. Asking a small model for prose there
         // produces invented purpose, so the card stays factual.
-        let mayWrite = Self.mayWriteProse(modelReady: modelReady,
-                                          sceneNarratives: store.narratives(from: windowStart, to: windowEnd, demo: false).count)
+        let mayWrite = Self.mayWriteProse(modelReady: modelReady, sceneNarratives: taskNarratives.count)
         let raw = mayWrite
             ? await interpreter.summarize(prompt: StoryWriter.taskPrompt(record), maxTokens: 320, stop: StoryWriter.taskStops)
             : nil
         var (title, story) = StoryWriter.acceptTitleAndStory(raw, record: record)
         story = NarrativeSanitizer.scrub(story)
         if !modelReady { story += " Install the local text model for a written account." }
+        story = StoryWriter.capStory(story)
         // How often has this shape of work been seen? A card is judged on the
         // history of its own app set, not on the busyness of one sitting.
         let signature = Set(apps.map { $0.lowercased() })

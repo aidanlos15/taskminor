@@ -97,6 +97,7 @@ enum TransferMiner {
                 medianDuration: sortedDurations[sortedDurations.count / 2],
                 totalDuration: durations.reduce(0, +),
                 daysObserved: days,
+                daysSeen: distinctDays(runs.map(\.end)),
                 automationScore: verdict.score,
                 sampleTitles: titles,
                 windows: windows.sorted { $0.start < $1.start },

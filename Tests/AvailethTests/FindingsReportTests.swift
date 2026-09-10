@@ -13,7 +13,7 @@ final class FindingsReportTests: XCTestCase {
     private func sensitiveInsight(automatable: Bool) -> WorkflowInsight {
         var p = WorkflowPattern(
             apps: ["Microsoft Excel", "NetSuite"],
-            occurrences: 12, medianDuration: 240, totalDuration: 2880, daysObserved: 4,
+            occurrences: 12, medianDuration: 240, totalDuration: 2880, daysObserved: 4, daysSeen: 4,
             automationScore: 70,
             sampleTitles: ["Invoice #10247 — Acme Corp", "Purchase Orders.xlsx", "Beata Kowalski payroll"],
             windows: [DateInterval(start: now, duration: 240)],

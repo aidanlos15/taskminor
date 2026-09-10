@@ -64,7 +64,7 @@ struct OverviewView: View {
 
     private var statRow: some View {
         let reliable = patterns.filter(\.projectionIsReliable)
-        let potential = reliable.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: state.hourlyRate) }
+        let potential = WorkflowPattern.combinedYearlySaving(patterns: reliable, hourlyRate: state.hourlyRate)
 
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 14)], spacing: 14) {
             StatCard(

@@ -259,12 +259,13 @@ struct PrivacyView: View {
 
             hairline
 
-            // Screen capture — a single on/off. On always uses the local Storyline
-            // model at full detail (no sub-choice).
+            // Screen capture - a single on/off. On always uses the local Storyline
+            // model at full detail (no sub-choice). It reads the screen only on a
+            // paste or a filled field, not on every screen.
             captureRow(
                 icon: "camera.viewfinder",
                 title: "Screen capture",
-                description: "A local model reads each new screen, then deletes the image — only text is kept.",
+                description: "A local model reads the screen when you paste or fill in a field, then deletes the image - only text is kept.",
                 on: Binding(
                     get: { state.engine.screenshotMode == .storyline },
                     set: { on in
@@ -343,7 +344,7 @@ struct PrivacyView: View {
     /// user had no other way to discover that.
     private var localAICard: some View {
         Card(title: "Local AI", subtitle: "Runs on this Mac through Ollama · nothing is sent to the internet") {
-            Text("Availeth writes your task stories with a small text model. Screen capture additionally reads each new screen with a vision model.")
+            Text("Availeth writes your task stories with a small text model. Screen capture additionally reads the screen with a vision model when you paste or fill in a field.")
                 .font(.caption).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
 
             modelStatusLine(ready: state.engine.textModelReady, title: "Text model", name: state.engine.textModelName, size: "1.9 GB",
@@ -708,6 +709,14 @@ struct PrivacyView: View {
                             .font(.callout)
                             .foregroundStyle(Theme.ink2)
                     }
+                }
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .frame(width: 20)
+                        .foregroundStyle(Theme.amber)
+                    Text("One thing Availeth does store: text you copy and then paste into another app is saved word for word in the local database, along with the app it came from and the app it went to.")
+                        .font(.callout)
+                        .foregroundStyle(Theme.ink2)
                 }
             }
         }

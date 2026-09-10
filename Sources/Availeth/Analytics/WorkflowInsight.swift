@@ -106,7 +106,7 @@ enum WorkflowInsighter {
             let evidence = Evidence.gather(
                 occSpans: occSpans,
                 transfers: runTransfers,
-                daysObserved: TransferMiner.distinctDays(pattern.windows.map(\.end)),
+                daysObserved: pattern.daysSeenOrObserved,
                 durations: occSpans.map { run in run.reduce(0.0) { $0 + $1.duration } }
             )
             let v = Verdict.assess(evidence)
@@ -255,7 +255,7 @@ enum WorkflowInsighter {
         var parts: [String] = []
         switch v.level {
         case .insufficient:
-            parts.append("Seen \(pattern.occurrences) time\(pattern.occurrences == 1 ? "" : "s") across \(pattern.daysObserved) day\(pattern.daysObserved == 1 ? "" : "s"). Availeth waits for \(Verdict.minOccurrences) runs on \(Verdict.minDays) separate days before judging whether something is worth automating, so that a busy hour is never mistaken for a routine.")
+            parts.append("Seen \(pattern.occurrences) time\(pattern.occurrences == 1 ? "" : "s") across \(pattern.daysSeenOrObserved) day\(pattern.daysSeenOrObserved == 1 ? "" : "s"). Availeth waits for \(Verdict.minOccurrences) runs on \(Verdict.minDays) separate days before judging whether something is worth automating, so that a busy hour is never mistaken for a routine.")
         case .low:
             let apps = distinct(pattern.apps.map(shortApp))
             parts.append("You repeat this move between \(apps.joined(separator: ", ")), but the evidence points away from a chore: \(v.reasons.joined(separator: ", ")).")
@@ -274,7 +274,7 @@ enum WorkflowInsighter {
             if !pattern.fields.isEmpty {
                 parts.append("The same fields are filled on most runs (\(pattern.fields.prefix(5).joined(separator: ", "))), so they could be filled from the source instead of typed.")
             }
-            parts.append("Seen \(pattern.occurrences) times across \(pattern.daysObserved) days.")
+            parts.append("Seen \(pattern.occurrences) times across \(pattern.daysSeenOrObserved) days, out of \(pattern.daysObserved) working day\(pattern.daysObserved == 1 ? "" : "s") watched.")
             if pattern.projectionIsReliable {
                 parts.append("At the rate observed, that is about \(Format.hours(pattern.estimatedHoursPerYear)) a year.")
             }

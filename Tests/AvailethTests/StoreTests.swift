@@ -29,6 +29,28 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(fetched[0].start.timeIntervalSince1970, span.start.timeIntervalSince1970, accuracy: 0.01)
     }
 
+    func testTransferPayloadRoundtripsAndIsCapped() {
+        let store = tempStore()
+        let now = Date()
+        let long = String(repeating: "x", count: 5000)
+        store.insert(transfer: Transfer(
+            at: now.addingTimeInterval(-10),
+            fromBundleID: "a", fromApp: "Excel", fromUnit: "Excel", fromTitle: "Book1",
+            toBundleID: "b", toApp: "NetSuite", toUnit: "NetSuite", toTitle: "Invoice",
+            toField: "Amount", gapSeconds: 3, payload: "ACME-1042"
+        ))
+        store.insert(transfer: Transfer(
+            at: now.addingTimeInterval(-5),
+            fromBundleID: "a", fromApp: "Excel", fromUnit: "Excel", fromTitle: "Book1",
+            toBundleID: "b", toApp: "NetSuite", toUnit: "NetSuite", toTitle: "Invoice",
+            toField: "Notes", gapSeconds: 2, payload: long
+        ))
+        let out = store.transfers(from: now.addingTimeInterval(-60), to: now, demo: false)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].payload, "ACME-1042")
+        XCTAssertEqual(out[1].payload.count, 4000)
+    }
+
     func testDemoAndLiveAreSeparated() {
         let store = tempStore()
         let now = Date()

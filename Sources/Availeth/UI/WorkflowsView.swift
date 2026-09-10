@@ -83,8 +83,10 @@ struct WorkflowsView: View {
     private var headerCard: some View {
         // Only genuine automation candidates count toward the headline figure.
         let reliable = insights.filter { $0.automatable && $0.pattern.projectionIsReliable }.map(\.pattern)
-        let totalSaving = reliable.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: state.hourlyRate) }
-        let totalHours = reliable.reduce(0.0) { $0 + $1.estimatedHoursPerYear }
+        // Counted once each: the same minute can sit inside several patterns'
+        // windows, so adding the patterns up would inflate the headline.
+        let totalSaving = WorkflowPattern.combinedYearlySaving(patterns: reliable, hourlyRate: state.hourlyRate)
+        let totalHours = WorkflowPattern.combinedHoursPerYear(patterns: reliable)
         return Card {
             HStack(alignment: .center, spacing: 20) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -138,7 +140,7 @@ struct WorkflowsView: View {
     }
 
     private var disclaimer: some View {
-        Text("Estimates are heuristic ranges extrapolated from the observed window at \(Format.money(state.hourlyRate))/hr. Treat them as directional — a real engagement validates each workflow with the people who run it.")
+        Text("How the yearly figure is worked out: the time this work took per working day Availeth watched, scaled to a 260-day year, priced at \(Format.money(state.hourlyRate))/hr, less the share a person still has to review. Time that belongs to more than one workflow is counted once. Watching for longer does not raise the figure - it only makes it steadier. Treat it as directional - a real engagement checks each workflow with the people who run it.")
             .font(.system(size: 11)).numeric()
             .foregroundStyle(Theme.ink3)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -212,7 +214,7 @@ struct WorkflowCard: View {
     }
 
     private var occurrenceLabel: String {
-        pattern.daysObserved > 1 ? "in \(pattern.daysObserved) workdays" : "today"
+        pattern.daysSeenOrObserved > 1 ? "on \(pattern.daysSeenOrObserved) of \(pattern.daysObserved) workdays" : "today"
     }
 
     private var chain: some View {

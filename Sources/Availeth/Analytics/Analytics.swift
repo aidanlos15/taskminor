@@ -166,15 +166,27 @@ enum Analytics {
         Set(spans.map { calendar.startOfDay(for: $0.start) }).count
     }
 
-    /// Distinct weekdays (Mon–Fri) covered — the denominator for per-working-day
-    /// extrapolation. Falls back to all days for weekend-only data.
+    /// A day with less activity than this is a sliver - the app was only running
+    /// for part of it - so it is not counted as a working day the app watched.
+    /// Counting a half-hour morning as a full day would drag the daily rate down
+    /// and make the yearly projection jump about.
+    static let minSecondsForAWatchedDay: TimeInterval = 2 * 3600
+
+    /// Distinct weekdays (Mon–Fri) the app actually watched — the denominator for
+    /// per-working-day extrapolation. Days with under two hours of activity are
+    /// left out as partial. Falls back to all days for weekend-only data, and to
+    /// the unfiltered count when every day is thin (so it is never zero).
     static func workdaysObserved(_ spans: [ActivitySpan], calendar: Calendar = .current) -> Int {
-        let days = Set(spans.map { calendar.startOfDay(for: $0.start) })
+        var seconds: [Date: TimeInterval] = [:]
+        for span in spans { seconds[calendar.startOfDay(for: span.start), default: 0] += span.duration }
+        let days = Set(seconds.keys)
         let workdays = days.filter {
             let weekday = calendar.component(.weekday, from: $0)
             return weekday >= 2 && weekday <= 6
         }
-        return workdays.isEmpty ? days.count : workdays.count
+        let candidates = workdays.isEmpty ? days : workdays
+        let full = candidates.filter { (seconds[$0] ?? 0) >= minSecondsForAWatchedDay }
+        return full.isEmpty ? candidates.count : full.count
     }
 
     /// Strips browser/app suffixes and noise from a window title so that

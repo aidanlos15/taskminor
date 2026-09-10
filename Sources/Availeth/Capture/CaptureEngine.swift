@@ -136,6 +136,24 @@ final class CaptureEngine: ObservableObject {
     /// underlying ScreenCaptureKit / model call has hung.
     private let maxCaptureBudget: TimeInterval = 60
 
+    /// The only actions storyline asks the local vision model to describe.
+    ///
+    /// Cost against signal. Every frame sent to the model pins a CPU core for
+    /// about fifteen seconds and drains the battery. On one 3.5 hour sitting the
+    /// model ran 628 times: 128 interval samples, about 420 app switches, 46
+    /// "Filled a field", 16 "Pasted", 18 "Copied". The interval samples and the
+    /// app switches were roughly 87% of the calls and said little more than the
+    /// window title already said. Text arriving in a field is the moment that
+    /// carries the work, so only those two triggers reach the model.
+    static let narratedTriggers: Set<String> = ["Pasted", "Filled a field"]
+
+    /// Whether a capture with this trigger should be sent to the model.
+    /// Thumbnails never call a model, so the restriction is storyline-only.
+    static func shouldNarrate(mode: ScreenshotMode, reason: String) -> Bool {
+        guard mode == .storyline else { return mode != .off }
+        return narratedTriggers.contains(reason)
+    }
+
     // Storyline decouples the FAST frame grab (~100ms) from the SLOW narration
     // (~15-20s), so no context switch is dropped while the model is thinking.
     private struct PendingFrame {
@@ -162,7 +180,7 @@ final class CaptureEngine: ObservableObject {
     /// Label of the text field currently in focus, as last pushed to the monitor.
     private var currentFieldLabel = ""
     /// The most recent copy or cut, waiting for a paste somewhere else.
-    private var lastCopy: (at: Date, bundleID: String, app: String, title: String)?
+    private var lastCopy: (at: Date, bundleID: String, app: String, title: String, text: String)?
     /// A paste this long after the copy is no longer treated as the same movement.
     private let transferWindow: TimeInterval = 90
     /// Raw title seen on the previous tick — a new title must be stable for two
@@ -571,14 +589,26 @@ final class CaptureEngine: ObservableObject {
 
     /// Turns a copy followed by a paste in a different context into a Transfer
     /// row. Only ever sees actions the monitor let through, so excluded apps and
-    /// secure fields never appear here. Structure only: which window the data
-    /// left, which window and field it landed in.
+    /// secure fields never appear here. Records the structure - which window the
+    /// data left, which window and field it landed in - and the text itself,
+    /// read from the pasteboard on the copy and stored verbatim with the row.
+    /// Most characters of pasted text kept on a transfer row.
+    private static let payloadCap = 4000
+
     private func noteTransfer(_ reason: String) {
         guard let span = openSpan else { return }
         let now = Date()
         switch reason {
         case "Copied", "Cut":
-            lastCopy = (now, span.bundleID, span.appName, span.title)
+            lastCopy = (now, span.bundleID, span.appName, span.title, "")
+            // The pasteboard is written just after the keystroke, so read it a
+            // moment later and fill the text in on the entry we just made.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, var c = self.lastCopy, c.at == now else { return }
+                let text = NSPasteboard.general.string(forType: .string) ?? ""
+                c.text = String(text.prefix(Self.payloadCap))
+                self.lastCopy = c
+            }
         case "Pasted":
             guard let c = lastCopy, now.timeIntervalSince(c.at) <= transferWindow else { return }
             let sameContext = c.bundleID == span.bundleID && c.title == span.title
@@ -590,7 +620,8 @@ final class CaptureEngine: ObservableObject {
                 toBundleID: span.bundleID, toApp: span.appName,
                 toUnit: WorkflowUnit.label(app: span.appName, title: span.title), toTitle: span.title,
                 toField: currentFieldLabel,
-                gapSeconds: now.timeIntervalSince(c.at)
+                gapSeconds: now.timeIntervalSince(c.at),
+                payload: c.text
             )
             store.insert(transfer: t)
             lastCopy = nil   // one copy feeds one transfer
@@ -637,6 +668,10 @@ final class CaptureEngine: ObservableObject {
         // holds only grabbingFrame during the fast grab, so it doesn't block.
         if screenshotMode == .thumbnails && captureInFlight { return }
         if screenshotMode == .storyline && (grabbingFrame || !interpreterReady) { return }
+        // Storyline only describes what the user typed or pasted, so a periodic
+        // sample or an app switch has nothing to send the model. Skip it here,
+        // before any frame is grabbed, so no core is spent on it.
+        if screenshotMode == .storyline { return }
 
         let context = frontBundleID + "|" + Analytics.normalizeTitle(title, appName: appName)
         let contextChanged = context != lastCaptureContext
@@ -659,6 +694,8 @@ final class CaptureEngine: ObservableObject {
     /// workflow is made of. Coalesces rapid actions into one capture.
     private func scheduleActionCapture(reason: String) {
         guard screenshotMode != .off, Permissions.screenRecordingGranted else { return }
+        // "Copied", "Cut" and "Saved" no longer reach the model in storyline mode.
+        guard Self.shouldNarrate(mode: screenshotMode, reason: reason) else { return }
         pendingActionReason = reason
         // Remember which app the action happened in; the debounced capture may
         // fire up to `floor` seconds later, by which point the front app could
@@ -691,6 +728,9 @@ final class CaptureEngine: ObservableObject {
         // Only attach the action label if we're still in the app the action
         // happened in; otherwise capture the frame with no (misleading) reason.
         let reason = (bundleID == pendingActionBundleID) ? pendingActionReason : ""
+        // The front app changed while the capture was debounced, so the frame
+        // carries no trigger. In storyline that leaves nothing worth narrating.
+        guard Self.shouldNarrate(mode: screenshotMode, reason: reason) else { return }
         beginCapture(now: Date(), frontBundleID: bundleID, appName: appName, title: title, context: context, reason: reason)
     }
 

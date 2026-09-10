@@ -72,8 +72,9 @@ enum ScreenshotMode: String, CaseIterable, Identifiable, Equatable {
     case off
     /// Store a locally-redacted (blurred) thumbnail, auto-deleted after 24h.
     case thumbnails
-    /// Interpret each frame with a LOCAL vision model into a one-line narrative,
-    /// store only that text, and delete the image immediately. No pixels persist.
+    /// When the user pastes or fills a field, a LOCAL vision model reads the
+    /// frame and writes a short narrative. Only that text is stored and the
+    /// image is deleted immediately. No pixels persist.
     case storyline
 
     var id: String { rawValue }
@@ -93,7 +94,7 @@ enum ScreenshotMode: String, CaseIterable, Identifiable, Equatable {
         case .thumbnails:
             return "Occasional captures. Each one is shrunk and blurred on this Mac before it is saved, then deleted after 24 hours."
         case .storyline:
-            return "A local vision model reads each capture and writes one line about the task. The image is deleted straight away and only the line is kept. Nothing leaves this Mac."
+            return "A local vision model reads the screen when you paste or fill in a field and writes a few lines about it. The image is deleted straight away and only the text is kept. Nothing leaves this Mac."
         }
     }
 }
@@ -278,6 +279,9 @@ struct Transfer: Identifiable, Equatable {
     var toField: String
     /// Seconds between the copy and the paste.
     var gapSeconds: TimeInterval
+    /// The text that was copied and then pasted, stored verbatim, capped at
+    /// 4000 characters. Empty when the clipboard held no plain text.
+    var payload: String = ""
     var isDemo: Bool = false
 
     /// "Excel → NetSuite", the hop this transfer represents.
@@ -294,8 +298,13 @@ struct WorkflowPattern: Identifiable, Equatable {
     var medianDuration: TimeInterval
     /// Total active time across all occurrences in the observed window.
     var totalDuration: TimeInterval
-    /// Number of days the source data covers (for extrapolation).
+    /// Working days of activity the app actually observed in the selected range.
+    /// This is the denominator for the yearly projection, so a workflow that runs
+    /// on 2 of 6 observed days is projected at 2/6 of a day's worth, not a full one.
     var daysObserved: Int
+    /// Distinct days this pattern itself was seen on. Drives reliability and the
+    /// "seen on N days" wording. Never the denominator for the projection.
+    var daysSeen: Int = 0
     /// Heuristic 0–100 score of how automatable this looks.
     var automationScore: Int
     /// Representative window titles seen inside occurrences, for context.
@@ -319,24 +328,92 @@ struct WorkflowPattern: Identifiable, Equatable {
     /// The shared automation judgement, when it has been computed.
     var verdict: Verdict? = nil
 
-    /// A single (possibly partial) observed day is too thin to annualize —
-    /// the UI shows projections only when this is true.
-    var projectionIsReliable: Bool { daysObserved >= 2 }
+    /// The most of a task's time automation is ever assumed to take back. Some
+    /// human review always remains.
+    static let maxRecoverable = 0.85
+
+    /// A single day of either kind is too thin to annualize - the UI shows
+    /// projections only when the app watched 2+ working days AND the pattern
+    /// turned up on 2+ of them.
+    var projectionIsReliable: Bool { daysObserved >= 2 && daysSeenOrObserved >= 2 }
+
+    /// daysSeen, falling back to the windows when a caller did not set it.
+    var daysSeenOrObserved: Int {
+        if daysSeen > 0 { return daysSeen }
+        guard !windows.isEmpty else { return daysObserved }
+        let cal = Calendar.current
+        return Set(windows.map { cal.startOfDay(for: $0.start) }).count
+    }
 
     /// Extrapolated hours per year, assuming the observed window is representative.
-    /// daysObserved counts working days, matching the 260-workday multiplier.
+    ///
+    /// The rate is measured per WORKING DAY THE APP WATCHED, not per day the
+    /// pattern happened to appear, so the figure is stable: watching the same
+    /// daily routine for five days gives the same yearly number as two days.
     var estimatedHoursPerYear: Double {
         guard daysObserved > 0 else { return 0 }
         let perDay = totalDuration / Double(daysObserved)
         return perDay * 260 / 3600 // 260 working days
     }
 
+    /// The share of this task's time automation could plausibly take back.
+    var recoverableFraction: Double {
+        min(WorkflowPattern.maxRecoverable, Double(automationScore) / 100.0)
+    }
+
     /// Extrapolated yearly labour cost that automation could recover.
     func estimatedYearlySaving(hourlyRate: Double) -> Double {
-        // Assume automation recovers a fraction of the time proportional to the score,
-        // capped at 85% — some human review always remains.
-        let recoverable = min(0.85, Double(automationScore) / 100.0)
-        return estimatedHoursPerYear * hourlyRate * recoverable
+        estimatedHoursPerYear * hourlyRate * recoverableFraction
+    }
+
+    // MARK: - Combined totals
+
+    /// Merges overlapping intervals into a disjoint set.
+    static func mergeWindows(_ windows: [DateInterval]) -> [DateInterval] {
+        let sorted = windows.sorted { $0.start < $1.start }
+        var out: [DateInterval] = []
+        for w in sorted {
+            if let last = out.last, w.start <= last.end {
+                out[out.count - 1] = DateInterval(start: last.start, end: max(last.end, w.end))
+            } else {
+                out.append(w)
+            }
+        }
+        return out
+    }
+
+    /// Hours per year across a set of patterns, counting each minute ONCE.
+    ///
+    /// The same minute can belong to several patterns' windows, so adding the
+    /// patterns up double counts. This takes the union of all their windows as
+    /// the ceiling and never reports more than that.
+    static func combinedHoursPerYear(patterns: [WorkflowPattern]) -> Double {
+        guard !patterns.isEmpty else { return 0 }
+        let summed = patterns.reduce(0.0) { $0 + $1.estimatedHoursPerYear }
+        let days = patterns.map(\.daysObserved).max() ?? 0
+        guard days > 0 else { return 0 }
+        let unionSeconds = mergeWindows(patterns.flatMap(\.windows)).reduce(0.0) { $0 + $1.duration }
+        let unionHours = unionSeconds / Double(days) * 260 / 3600
+        // No windows recorded (older data, or synthetic patterns) - fall back to
+        // the sum rather than silently reporting zero.
+        guard unionSeconds > 0 else { return summed }
+        return min(summed, unionHours)
+    }
+
+    /// Yearly saving across a set of patterns, counting each minute once.
+    ///
+    /// The recoverable share is weighted by how much time each pattern
+    /// contributes, then applied to the de-duplicated hours.
+    static func combinedYearlySaving(patterns: [WorkflowPattern], hourlyRate: Double) -> Double {
+        guard !patterns.isEmpty else { return 0 }
+        let hours = combinedHoursPerYear(patterns: patterns)
+        guard hours > 0 else { return 0 }
+        let weightTotal = patterns.reduce(0.0) { $0 + $1.estimatedHoursPerYear }
+        let weighted = weightTotal > 0
+            ? patterns.reduce(0.0) { $0 + $1.estimatedHoursPerYear * $1.recoverableFraction } / weightTotal
+            : maxRecoverable
+        let summed = patterns.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: hourlyRate) }
+        return min(summed, hours * hourlyRate * min(maxRecoverable, weighted))
     }
 }
 

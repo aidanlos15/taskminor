@@ -44,7 +44,7 @@ struct FindingsReport: Equatable, Identifiable {
                 Finding(
                     systems: i.pattern.apps,
                     occurrences: i.pattern.occurrences,
-                    daysObserved: i.pattern.daysObserved,
+                    daysObserved: i.pattern.daysSeenOrObserved,
                     medianSeconds: Int(i.pattern.medianDuration),
                     transfers: i.pattern.transferCount,
                     fields: i.pattern.fields,

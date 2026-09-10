@@ -235,7 +235,7 @@ struct WorkflowDetailView: View {
         let v = pattern.verdict
         HStack(alignment: .top, spacing: 24) {
             evidenceItem("\(pattern.occurrences)", "runs seen")
-            evidenceItem("\(pattern.daysObserved)", pattern.daysObserved == 1 ? "day" : "separate days")
+            evidenceItem("\(pattern.daysSeenOrObserved)", pattern.daysSeenOrObserved == 1 ? "day" : "separate days")
             if pattern.transferCount > 0 { evidenceItem("\(pattern.transferCount)", "data movements") }
             if !pattern.fields.isEmpty { evidenceItem("\(pattern.fields.count)", "fields each run") }
             Spacer()

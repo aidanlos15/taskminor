@@ -206,7 +206,7 @@ enum StoryWriter {
             s += " Typed into " + fieldWins.map { "\($0.fields.prefix(4).joined(separator: ", ")) in \($0.app)" }.joined(separator: "; ") + "."
         }
         if !r.moves.isEmpty { s += " Moved data from " + r.moves.prefix(3).joined(separator: "; ") + "." }
-        return s
+        return capStory(s)
     }
 
     // MARK: - The minute prompt
@@ -276,6 +276,48 @@ enum StoryWriter {
         var keystrokes: Int
         /// Windows ranked by minutes seen, with their share words.
         var ranked: [(window: Window, share: String)]
+        /// What the local vision model saw on screen during this task, newest
+        /// first: the first sentence of each of the last few narratives.
+        var sceneNotes: [String] = []
+    }
+
+    /// The first sentence of a narrative, trimmed and closed with a full stop.
+    static func firstSentence(_ raw: String) -> String {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+        var out = text
+        if let stop = text.firstIndex(where: { $0 == "." || $0 == "!" || $0 == "?" }) {
+            out = String(text[...stop])
+        }
+        out = out.trimmingCharacters(in: .whitespaces)
+        if let last = out.last, last != "." && last != "!" && last != "?" { out += "." }
+        return out
+    }
+
+    /// The newest few screen notes, one sentence each, with repeats dropped.
+    static func sceneNotes(_ narratives: [SceneNarrative], limit: Int = 3) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        for n in narratives.sorted(by: { $0.timestamp > $1.timestamp }) {
+            let line = firstSentence(n.text)
+            guard !line.isEmpty else { continue }
+            let key = line.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            out.append(line)
+            if out.count == limit { break }
+        }
+        return out
+    }
+
+    /// Task cards are read at a glance, so a story stops at roughly 500
+    /// characters, on a sentence boundary where there is one.
+    static func capStory(_ text: String, limit: Int = 500) -> String {
+        guard text.count > limit else { return text }
+        let head = String(text.prefix(limit))
+        if let stop = head.lastIndex(of: "."), head.distance(from: head.startIndex, to: stop) > limit / 3 {
+            return String(head[...stop])
+        }
+        return head.trimmingCharacters(in: .whitespaces) + "…"
     }
 
     static func lengthWords(minutes n: Int) -> String {
@@ -283,7 +325,7 @@ enum StoryWriter {
             : n < 40 ? "about half an hour" : "the best part of an hour"
     }
 
-    static func taskRecord(minutes: [MinuteSummary], transfers: [Transfer]) -> TaskRecord {
+    static func taskRecord(minutes: [MinuteSummary], transfers: [Transfer], narratives: [SceneNarrative] = []) -> TaskRecord {
         var minutesSeen: [String: Int] = [:]
         var windows: [String: Window] = [:]
         var order: [String] = []
@@ -327,6 +369,8 @@ enum StoryWriter {
         }
         let entryLines = entries.map { "- \($0.text)" + ($0.count > 1 ? " (repeated \(timesWord($0.count)))" : "") }
 
+        let notes = sceneNotes(narratives)
+
         let length = lengthWords(minutes: minutes.count)
         var lines = ["Length: \(length)"]
         lines.append("Windows: " + (ranked.isEmpty ? "none" : ranked.map { "\($0.window.label) (\($0.share))" }.joined(separator: "; ")))
@@ -334,12 +378,16 @@ enum StoryWriter {
         lines.append("Typing: \(typingLevel(keystrokes / n)) overall. Clicking: \(clickLevel(clicks / n)) overall.")
         lines.append("Keys: " + (keys.isEmpty ? "none" : keys.joined(separator: ", ")))
         lines.append("Data moved: " + (moves.isEmpty ? "none" : moves.joined(separator: "; ")))
+        if !notes.isEmpty {
+            lines.append("What the screen showed, newest first:")
+            lines.append(contentsOf: notes.map { "- \($0)" })
+        }
         lines.append("Minute entries, in order:")
         lines.append(contentsOf: entryLines.prefix(45))
 
         return TaskRecord(text: lines.joined(separator: "\n"), apps: apps, topWindow: ranked.first?.window,
                           moves: moves, lengthWords: length, fields: fields, keys: keys, minuteCount: minutes.count,
-                          keystrokes: keystrokes, ranked: Array(ranked))
+                          keystrokes: keystrokes, ranked: Array(ranked), sceneNotes: notes)
     }
 
     // MARK: - The task prompt
@@ -354,9 +402,10 @@ enum StoryWriter {
         1. Start each sentence with a verb. Do not name the person working and do not write "the user" or "the employee".
         2. State only what the record shows. Never add a reason, a goal, or a project that is not in the record.
         3. Only say that something was copied, pasted, or moved from one window to another if the "Data moved" line says so.
-        4. Write two to four sentences in your own words covering the whole task in order, using the time shares in the Windows line. Do not copy the minute entries and do not write numbers or key names.
-        5. Reply with two lines: first "STORY:" then the sentences, then "TITLE:" then the title.
-        6. The title is three to six words naming the work itself, for example "Vendor bill entry from purchase orders". It must not contain the words automation, management, workflow, task, process, activity, session or work, and no personal name.
+        4. If the record has a "What the screen showed" section, say what was done there in the first sentence, naming the thing that was pasted or typed and where it went.
+        5. Write two to four sentences in your own words covering the whole task in order, using the time shares in the Windows line. Do not copy the minute entries and do not write numbers or key names.
+        6. Reply with two lines: first "STORY:" then the sentences, then "TITLE:" then the title.
+        7. The title is three to six words naming the work itself, for example "Vendor bill entry from purchase orders". It must not contain the words automation, management, workflow, task, process, activity, session or work, and no personal name.
 
         Example record
         Length: about a quarter of an hour
@@ -380,7 +429,12 @@ enum StoryWriter {
     /// A true account of the task built only from the record, for when there is
     /// no model or its story failed its checks.
     static func plainStory(_ r: TaskRecord) -> String {
-        var s = r.lengthWords.prefix(1).uppercased() + r.lengthWords.dropFirst()
+        // What the screen showed beats a count of keystrokes, so the notes lead
+        // and the structure sentence follows as the backing detail. With no
+        // notes the structure sentence is the whole story, as it always was.
+        var s = ""
+        if !r.sceneNotes.isEmpty { s = r.sceneNotes.joined(separator: " ") + " " }
+        s += r.lengthWords.prefix(1).uppercased() + r.lengthWords.dropFirst()
         if let top = r.ranked.first {
             s += ", mostly in \(top.window.label)"
             let rest = r.ranked.dropFirst().prefix(3).map(\.window.label)
@@ -395,7 +449,7 @@ enum StoryWriter {
         s += " \(typing)."
         if !r.fields.isEmpty { s += " Typed into " + joinAnd(Array(r.fields.prefix(5))) + "." }
         if !r.moves.isEmpty { s += " Moved data from " + r.moves.prefix(3).joined(separator: "; ") + "." }
-        return s
+        return capStory(s)
     }
 
     /// A title that names the place of the work when the model gave none worth
@@ -415,7 +469,7 @@ enum StoryWriter {
         let fallbackTitle = plainTitle(apps: record.apps, topWindow: record.topWindow)
         let fallbackStory = plainStory(record)
         let (t, s) = Synthesizer.parseTitleAndStory(raw, fallbackApps: record.apps, fallbackStory: fallbackStory)
-        let story = Check.tidy(s, maxSentences: 5)
+        let story = capStory(Check.tidy(s, maxSentences: 5))
         let storyOK = !story.isEmpty && story != fallbackStory
             && Check.entryProblems(story, record: record.text, hasMoves: !record.moves.isEmpty).isEmpty
         let title = Check.tidyTitle(t)
