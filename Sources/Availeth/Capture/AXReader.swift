@@ -16,11 +16,28 @@ enum AXReader {
         AXIsProcessTrustedWithOptions(options)
     }
 
+    /// Electron and Chromium apps (VS Code, Teams, Slack, Chrome) build their
+    /// accessibility tree only after a client asks for it. Without this they
+    /// answer with a window title and nothing inside it, so no field labels.
+    /// Asked once per process. Called from the main thread and the AX queue,
+    /// so the set sits behind a lock.
+    private static var enabledPIDs = Set<pid_t>()
+    private static let enabledLock = NSLock()
+    private static func enableAccessibilityIfNeeded(_ appElement: AXUIElement, pid: pid_t) {
+        enabledLock.lock()
+        let first = enabledPIDs.insert(pid).inserted
+        enabledLock.unlock()
+        guard first else { return }
+        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+    }
+
     /// Title of the focused window of the given process, or nil when the
     /// permission is missing or the app exposes no title.
     static func focusedWindowTitle(pid: pid_t) -> String? {
         guard isTrusted else { return nil }
         let appElement = AXUIElementCreateApplication(pid)
+        enableAccessibilityIfNeeded(appElement, pid: pid)
         // AX calls are blocking Mach IPC with a ~6s default timeout; a hung
         // frontmost app must never stall our polling for more than a beat.
         AXUIElementSetMessagingTimeout(appElement, 0.25)
@@ -52,6 +69,7 @@ enum AXReader {
         guard isTrusted else { return nil }
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.25)
+        enableAccessibilityIfNeeded(appElement, pid: pid)
 
         var elementRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &elementRef) == .success,

@@ -137,7 +137,7 @@ struct TransfersView: View {
                 if !r.fields.isEmpty {
                     Text("into \(r.fields.joined(separator: ", "))").font(.system(size: 11.5)).foregroundStyle(Theme.ink2)
                 } else {
-                    Text("no field label in focus").font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
+                    Text("pasted into the page or editor, not a named field").font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
                 }
                 Text("\(r.days) day\(r.days == 1 ? "" : "s") · about \(Int(r.medianGap))s from copy to paste · last \(r.lastSeen.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption2).foregroundStyle(Theme.ink3)
