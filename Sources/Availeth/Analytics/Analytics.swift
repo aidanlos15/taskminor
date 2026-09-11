@@ -35,63 +35,87 @@ enum Analytics {
 
     // MARK: - Detailed, content-rich tasks
 
-    /// Like `taskGroups`, but attaches the captured detailed narratives to each
-    /// task and splits generic lumps (e.g. all "Claude" usage) into distinct
-    /// conversations by content, so each row says WHAT the work actually was.
-    static func detailedTasks(_ spans: [ActivitySpan], narratives: [SceneNarrative], calendar: Calendar = .current) -> [DetailedTask] {
-        // 1. Collect spans per task key (unit + normalized title).
-        struct Group { var unit: String; var title: String; var generic: Bool; var spans: [ActivitySpan] }
+    /// Every distinct piece of work as one row. Spans group by unit (app or site)
+    /// and by TASK: the intent label the labeler persisted for the span when it
+    /// has one, else the cleaned window title. Bare titles ("Claude") with no
+    /// label yet collapse onto the unit until the labeler names them — never a
+    /// screenshot sentence. Captured narratives attach by unit and time.
+    static func detailedTasks(_ spans: [ActivitySpan], narratives: [SceneNarrative], labels: [Int64: SpanLabel] = [:], calendar: Calendar = .current) -> [DetailedTask] {
+        struct Group {
+            var unit: String; var title: String; var source: LabelSource
+            var spans: [ActivitySpan]; var titles: [String: TimeInterval]
+        }
         var groups: [String: Group] = [:]
         for span in spans {
             let unit = WorkflowUnit.label(app: span.appName, title: span.windowTitle)
-            let title = normalizeTitle(span.windowTitle, appName: span.appName)
-            let key = unit + "\u{1F}" + title
-            // "Generic" = the title says nothing beyond the app/site (e.g. a bare
-            // "Claude" or "ChatGPT" window) → worth splitting into conversations.
-            let generic = title.hasPrefix("General ") || title == unit
-            var g = groups[key] ?? Group(unit: unit, title: title, generic: generic, spans: [])
+            let clean = LabelKey.cleanTitle(span.windowTitle, appName: span.appName)
+            let title: String, source: LabelSource
+            if let label = labels[span.id], !label.canon.isEmpty {
+                title = label.canon; source = label.source
+            } else if LabelKey.isUninformative(unit: unit, cleanTitle: clean) {
+                title = unit; source = .fallback
+            } else {
+                title = clean; source = .title
+            }
+            let key = unit + "\u{1F}" + LabelKey.canonKey(title)
+            var g = groups[key] ?? Group(unit: unit, title: title, source: source, spans: [], titles: [:])
             g.spans.append(span)
+            g.titles[clean, default: 0] += span.duration
+            if source == .model { g.source = .model }
             groups[key] = g
         }
-        // 2. Index narratives by the same key.
-        let sortedNarr = narratives.sorted { $0.timestamp < $1.timestamp }
-        var narrByKey: [String: [SceneNarrative]] = [:]
-        for n in sortedNarr {
-            let key = WorkflowUnit.label(app: n.appName, title: n.windowTitle) + "\u{1F}" + normalizeTitle(n.windowTitle, appName: n.appName)
-            narrByKey[key, default: []].append(n)
-        }
 
-        // 3. Build tasks. Generic groups with content get split into conversations.
-        var out: [DetailedTask] = []
+        // Sittings per group.
+        struct Built { var key: String; var g: Group; var spans: [ActivitySpan]; var runs: [SessionRun] }
+        var builtByUnit: [String: [Built]] = [:]
         for (key, g) in groups {
-            let groupNarr = narrByKey[key] ?? []
-            if g.generic, groupNarr.count > 1 {
-                let sessions = splitSpansByGap(g.spans.sorted { $0.start < $1.start }, gap: 5 * 60)
-                if sessions.count > 1 {
-                    for (i, sess) in sessions.enumerated() {
-                        guard let s0 = sess.first?.start, let s1 = sess.last?.end else { continue }
-                        let moments = groupNarr.filter { $0.timestamp >= s0.addingTimeInterval(-30) && $0.timestamp <= s1.addingTimeInterval(30) }
-                        out.append(makeTask(id: "\(key)#\(i)", unit: g.unit, fallbackTitle: g.title, spans: sess, moments: moments))
-                    }
-                    continue
-                }
+            let sorted = g.spans.sorted { $0.start < $1.start }
+            let runs: [SessionRun] = splitSpansByGap(sorted, gap: 5 * 60).compactMap { run in
+                guard let first = run.first, let end = run.map(\.end).max() else { return nil }
+                var byTitle: [String: TimeInterval] = [:]
+                for s in run { byTitle[LabelKey.cleanTitle(s.windowTitle, appName: s.appName), default: 0] += s.duration }
+                let title = byTitle.max { $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key }?.key ?? g.title
+                return SessionRun(start: first.start, end: end, windowTitle: title, spanCount: run.count)
             }
-            out.append(makeTask(id: key, unit: g.unit, fallbackTitle: g.title, spans: g.spans, moments: groupNarr))
+            builtByUnit[g.unit, default: []].append(Built(key: key, g: g, spans: sorted, runs: runs))
         }
-        return out.sorted { $0.duration > $1.duration }
-    }
 
-    private static func makeTask(id: String, unit: String, fallbackTitle: String, spans: [ActivitySpan], moments raw: [SceneNarrative]) -> DetailedTask {
-        let moments = dedupNarratives(raw.sorted { $0.timestamp < $1.timestamp })
-        let duration = spans.reduce(0) { $0 + $1.duration }
-        let lastSeen = spans.map(\.end).max() ?? Date()
-        // Title: a real window title if we have one; otherwise (bare app/site
-        // name, or "General …") derive a headline from the captured content.
-        let uninformative = fallbackTitle.hasPrefix("General ") || fallbackTitle == unit
-        let title = (uninformative ? taskLabel(from: moments) : nil) ?? fallbackTitle
-        let preview = moments.max(by: { $0.text.count < $1.text.count })?.text ?? ""
-        return DetailedTask(id: id, title: title, appUnit: unit, duration: duration,
-                            sessions: spans.count, lastSeen: lastSeen, moments: moments, preview: preview)
+        // Each narrative attaches to the ONE task of its unit whose sitting
+        // contains it; only when none does may a task within 30 s claim it, so a
+        // neighbouring task's screen never becomes this task's detail.
+        var narrByUnit: [String: [SceneNarrative]] = [:]
+        for n in narratives.sorted(by: { $0.timestamp < $1.timestamp }) {
+            narrByUnit[WorkflowUnit.label(app: n.appName, title: n.windowTitle), default: []].append(n)
+        }
+        var momentsByKey: [String: [SceneNarrative]] = [:]
+        for (unit, items) in builtByUnit {
+            let ordered = items.sorted { $0.key < $1.key }
+            for n in narrByUnit[unit] ?? [] {
+                func distance(_ b: Built) -> TimeInterval {
+                    b.runs.map { r in
+                        n.timestamp < r.start ? r.start.timeIntervalSince(n.timestamp)
+                            : (n.timestamp > r.end ? n.timestamp.timeIntervalSince(r.end) : 0)
+                    }.min() ?? .infinity
+                }
+                let target = ordered.first { distance($0) == 0 }
+                    ?? ordered.filter { distance($0) <= 30 }.min { distance($0) < distance($1) }
+                if let t = target { momentsByKey[t.key, default: []].append(n) }
+            }
+        }
+
+        var out: [DetailedTask] = []
+        for b in builtByUnit.values.joined() {
+            let moments = dedupNarratives(momentsByKey[b.key] ?? [])
+            let preview = moments.max(by: { $0.text.count < $1.text.count })?.text ?? ""
+            let variants = b.g.titles.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
+            out.append(DetailedTask(
+                id: b.key, title: b.g.title, appUnit: b.g.unit,
+                duration: b.spans.reduce(0) { $0 + $1.duration },
+                sessions: b.runs.count, lastSeen: b.spans.map(\.end).max() ?? Date(),
+                moments: moments, preview: preview, source: b.g.source, runs: b.runs, variants: variants
+            ))
+        }
+        return out.sorted { $0.duration != $1.duration ? $0.duration > $1.duration : $0.id < $1.id }
     }
 
     /// Splits a time-sorted span list into sessions on gaps larger than `gap`.

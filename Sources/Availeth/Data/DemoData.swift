@@ -47,9 +47,9 @@ enum DemoData {
             while clock < endOfDay {
                 // Weighted activity picker; workflow weights drop out once the
                 // daily quota is met so the remainder of the day stays balanced.
-                enum Activity { case invoice, crm, slack, browse, deepWork, mail, meeting }
+                enum Activity { case invoice, crm, slack, browse, deepWork, mail, meeting, claude }
                 var choices: [(Double, Activity)] = [
-                    (10, .slack), (10, .browse), (9, .deepWork), (6, .mail), (8, .meeting),
+                    (10, .slack), (10, .browse), (9, .deepWork), (6, .mail), (8, .meeting), (7, .claude),
                 ]
                 if invoicesDone < invoiceTarget { choices.append((28, .invoice)) }
                 if crmDone < crmTarget { choices.append((14, .crm)) }
@@ -76,6 +76,11 @@ enum DemoData {
                     clock = append(&spans, at: clock, app: .excel, title: deepWorkTitle(rng: &rng), minutes: Double.random(in: 12...30, using: &rng), rng: &rng)
                 case .mail:
                     clock = append(&spans, at: clock, app: .mail, title: "Inbox", minutes: Double.random(in: 4...9, using: &rng), rng: &rng)
+                case .claude:
+                    // A bare "Claude" window: the intent labels (seedSpanLabels) name these sittings.
+                    clock = append(&spans, at: clock, app: .claude, title: "Claude", minutes: Double.random(in: 6...14, using: &rng), rng: &rng,
+                                   keys: Int.random(in: 120...420, using: &rng), clicks: Int.random(in: 6...24, using: &rng),
+                                   shortcuts: "\u{2318}V\u{00D7}2, \u{21B5}\u{00D7}3", fields: "Message Claude [prompt]")
                 case .meeting:
                     clock = append(&spans, at: clock, app: .calendar, title: "Team Standup", minutes: 2, rng: &rng)
                     clock = clock.addingTimeInterval(Double.random(in: 25...45, using: &rng) * 60)
@@ -332,13 +337,58 @@ enum DemoData {
         return options[Int.random(in: 0..<options.count, using: &rng)]
     }
 
+    /// Demo intent labels: every Claude sitting gets a task title (and one
+    /// captured narrative, so "captured" detail exists to open) and every other
+    /// sitting gets the deterministic row the labeler would write — so the demo
+    /// Tasks tab shows the finished shape without a local model.
+    static func seedSpanLabels(into store: Store) {
+        let spans = store.spans(from: .distantPast, to: .distantFuture, demo: true)
+        let sessions = IntentLabeler.sessionise(spans, gap: 5 * 60).sorted { $0.start < $1.start }
+        let rota: [(title: String, narrative: String)] = [
+            ("Draft the supplier payment-terms email",
+             "The user asks Claude to rewrite a payment-terms paragraph for a supplier email, pasting the current wording and asking for a firmer but polite tone."),
+            ("Explain month-end accrual entries",
+             "The user asks Claude how to book month-end accruals for services received but not yet invoiced, then follows up on reversing them next period."),
+            ("Write a NetSuite CSV import formula",
+             "The user asks Claude for an Excel formula that reshapes a purchase-order export into the column layout NetSuite's CSV import expects."),
+            ("Summarise the weekly ops review",
+             "The user pastes bullet notes from the ops review and asks Claude for a short summary to send to the team."),
+        ]
+        let now = Date()
+        var rows: [SpanLabel] = []
+        var narratives: [SceneNarrative] = []
+        var pick = 0
+        for s in sessions {
+            if s.unit == "Claude" {
+                let item = rota[pick % rota.count]
+                pick += 1
+                rows += s.spans.map {
+                    SpanLabel(spanID: $0.id, sessionKey: s.sessionKey, unit: s.unit, titleKey: s.titleKey,
+                              intent: item.title, canon: item.title, source: .model, model: "demo", created: now, isDemo: true)
+                }
+                narratives.append(SceneNarrative(timestamp: s.start.addingTimeInterval(45), appName: "Claude", windowTitle: "Claude",
+                                                 text: item.narrative, trigger: "Pasted", isDemo: true))
+            } else {
+                let informative = !LabelKey.isUninformative(unit: s.unit, cleanTitle: s.cleanTitle)
+                let title = informative ? s.cleanTitle : s.unit
+                rows += s.spans.map {
+                    SpanLabel(spanID: $0.id, sessionKey: s.sessionKey, unit: s.unit, titleKey: s.titleKey,
+                              intent: title, canon: title, source: informative ? .title : .fallback, created: now, isDemo: true)
+                }
+            }
+        }
+        store.insertSpanLabels(rows)
+        narratives.forEach { store.insertNarrative($0) }
+    }
+
     // MARK: - Plumbing
 
     private enum DemoApp {
-        case mail, preview, excel, chrome, slack, keynote, calendar
+        case mail, preview, excel, chrome, slack, keynote, calendar, claude
 
         var identity: (bundle: String, name: String) {
             switch self {
+            case .claude: return ("com.anthropic.claudefordesktop", "Claude")
             case .mail: return ("com.apple.mail", "Mail")
             case .preview: return ("com.apple.Preview", "Preview")
             case .excel: return ("com.microsoft.Excel", "Microsoft Excel")

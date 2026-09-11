@@ -114,7 +114,7 @@ struct LogsView: View {
 
     private var storylineCard: some View {
         let entries = Array(timeline.prefix(80))
-        return Card(title: "Storyline", subtitle: "What a local vision model saw you doing, with away-from-keyboard time marked. Images are kept locally, auto-deleted after 24h; the model is told to avoid specifics and a local scrub strips emails, amounts, and ID numbers.") {
+        return Card(title: "Storyline", subtitle: "What a local vision model saw you doing, with away-from-keyboard time marked. Images are kept locally and deleted after 24h; the text stays for 90 days so tasks and workflows keep their detail. The model is told to avoid specifics and a local scrub strips emails, amounts, and ID numbers.") {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                     switch entry {
@@ -215,6 +215,7 @@ struct LogsView: View {
                 schemaRow("macwindow", "Window title", "The focused window's title bar text — only if you granted Accessibility. Empty otherwise. This is the only content-adjacent field.")
                 schemaRow("keyboard", "Keyboard & mouse activity (if enabled)", "Shortcuts used, keys/clicks counted, and which field was typed into — the structure of the work, never the characters typed.")
                 schemaRow("doc.text.magnifyingglass", "Document (if enabled)", "The name/path of the file open in the window — its identity, never its contents.")
+                schemaRow("globe", "Website (if enabled)", "The host name of the page in a browser tab, e.g. onlinebanking.aib.ie — never the full address or the page. Used only to show the site's icon.")
                 schemaRow("tag", "Source flag", "Whether the record belongs to the demo dataset or your live capture. The two are never mixed.")
             }
             Rectangle().fill(Theme.line).frame(height: 1)
@@ -371,6 +372,12 @@ struct LogsView: View {
                     }
                     if !span.documentPath.isEmpty {
                         Label(URL(fileURLWithPath: span.documentPath).lastPathComponent, systemImage: "doc")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.ink2)
+                            .lineLimit(1)
+                    }
+                    if !span.pageHost.isEmpty {
+                        Label(span.pageHost, systemImage: "globe")
                             .font(.system(size: 9))
                             .foregroundStyle(Theme.ink2)
                             .lineLimit(1)

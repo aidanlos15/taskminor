@@ -52,15 +52,23 @@ final class AppState: ObservableObject {
     }
 
     let synthesizer: Synthesizer
+    /// Names sittings of work by intent for the Tasks tab (same local model).
+    let labeler: IntentLabeler
 
     private var cancellables: Set<AnyCancellable> = []
     private var synthTimer: Timer?
+    /// The in-flight synthesis → labelling chain; a tick is skipped while the
+    /// previous one is still running, so the two never overlap on the model.
+    private var pipelineTask: Task<Void, Never>?
 
     private init() {
         let store = Store(url: Store.defaultURL())
         self.store = store
         self.engine = CaptureEngine(store: store)
-        self.synthesizer = Synthesizer(store: store, interpreter: OllamaInterpreter())
+        let interpreter = OllamaInterpreter()
+        self.synthesizer = Synthesizer(store: store, interpreter: interpreter)
+        self.labeler = IntentLabeler(store: store, interpreter: interpreter)
+        SiteIconStore.shared.attach(store: store)
 
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "availeth.showDemo") == nil {
@@ -87,6 +95,13 @@ final class AppState: ObservableObject {
         engine.onIdleRecorded = { [weak self] in
             DispatchQueue.main.async { self?.dataVersion += 1 }
         }
+        // A site's icon arrived: forget the lettermark and let every screen repaint.
+        SiteIconStore.shared.onIconStored = { [weak self] domain in
+            DispatchQueue.main.async {
+                LogoProvider.shared.invalidate(site: domain)
+                self?.dataVersion += 1
+            }
+        }
         // Forward engine changes (pause state, current app) to our observers.
         engine.objectWillChange
             .receive(on: DispatchQueue.main)
@@ -95,17 +110,41 @@ final class AppState: ObservableObject {
     }
 
     func bootstrap() {
-        if store.spanCount(demo: true) == 0 {
-            store.insertBatch(DemoData.generate())
+        // The demo generator changed (Claude sittings + intent labels): rebuild
+        // the demo dataset once for installs that seeded the older one. A fresh
+        // install seeds below instead and records the version.
+        let demoVersion = 2
+        let seededVersion = UserDefaults.standard.integer(forKey: "availeth.demoVersion")
+        if seededVersion < demoVersion, store.spanCount(demo: true) > 0 {
+            resetDemoData()
+        } else {
+            if store.spanCount(demo: true) == 0 {
+                store.insertBatch(DemoData.generate())
+            }
+            if store.narrativeCount(demo: true) == 0 {
+                DemoData.generateNarratives().forEach { store.insertNarrative($0) }
+            }
+            if store.idleSessions(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
+                DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
+            }
+            if store.taskSummaries(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
+                DemoData.seedSummaries(into: store)
+            }
+            if store.spanLabelCount(demo: true) == 0 {
+                DemoData.seedSpanLabels(into: store)
+            }
         }
-        if store.narrativeCount(demo: true) == 0 {
-            DemoData.generateNarratives().forEach { store.insertNarrative($0) }
-        }
-        if store.idleSessions(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
-            DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
-        }
-        if store.taskSummaries(from: .distantPast, to: .distantFuture, demo: true).isEmpty {
-            DemoData.seedSummaries(into: store)
+        UserDefaults.standard.set(demoVersion, forKey: "availeth.demoVersion")
+
+        // One-time sweep of system-process rows (lock screen, Wi-Fi sign-in,
+        // auth prompts) recorded before they were filtered at capture, and of
+        // app names carrying invisible format marks.
+        let purgeVersion = 1
+        if UserDefaults.standard.integer(forKey: "availeth.systemPurgeVersion") < purgeVersion {
+            store.deleteSpans(bundleIDs: SystemProcesses.bundleIDs)
+            ScreenshotCapture.deleteFiles(store.deleteNarratives(appNames: SystemProcesses.appNames))
+            store.normaliseAppNames()
+            UserDefaults.standard.set(purgeVersion, forKey: "availeth.systemPurgeVersion")
         }
         // Honor a persisted Stop: capture never silently restarts after the
         // user turned it off. (An expired pause resumes; an active one holds.)
@@ -126,10 +165,15 @@ final class AppState: ObservableObject {
     }
 
     private func runSynthesis() {
-        Task { [weak self] in
+        guard pipelineTask == nil else { return }   // previous tick still on the model
+        pipelineTask = Task { [weak self] in
             guard let self else { return }
             await self.synthesizer.run()
-            await MainActor.run { self.dataVersion += 1 }
+            await self.labeler.run()
+            await MainActor.run {
+                self.dataVersion += 1
+                self.pipelineTask = nil
+            }
         }
     }
 
@@ -154,13 +198,16 @@ final class AppState: ObservableObject {
         engine.purgeAllLiveScreenshots()
         store.deleteSummaries(scope: .live)
         store.deleteIdleSessions(scope: .live)
+        // Live span labels went with their spans (deleteLiveData sweeps orphans).
+        SiteIconStore.shared.purgeAll()
+        LogoProvider.shared.invalidateAllSites()
         engine.discardCurrentAndRefresh()
         dataVersion += 1
         refreshTodayTopApps()
     }
 
     func resetDemoData() {
-        store.deleteAll(demoOnly: true)
+        store.deleteAll(demoOnly: true)   // also sweeps the demo spans' labels
         store.deleteNarratives(scope: .demo)
         store.deleteIdleSessions(scope: .demo)
         store.deleteSummaries(scope: .demo)
@@ -168,17 +215,8 @@ final class AppState: ObservableObject {
         DemoData.generateNarratives().forEach { store.insertNarrative($0) }
         DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
         DemoData.seedSummaries(into: store)
+        DemoData.seedSpanLabels(into: store)
         dataVersion += 1
-    }
-
-    // MARK: - Story queries
-
-    func taskSummaries(in range: TimeRange) -> [TaskSummary] {
-        store.taskSummaries(from: range.startDate(), to: Date().addingTimeInterval(60), demo: showDemo)
-    }
-
-    func minutes(forTask id: Int64) -> [MinuteSummary] {
-        store.minutesForTask(id)
     }
 
     // MARK: - Launch at login

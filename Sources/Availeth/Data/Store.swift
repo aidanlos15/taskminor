@@ -57,6 +57,7 @@ final class Store {
         addColumnIfMissing(table: "spans", column: "doc_path", decl: "TEXT NOT NULL DEFAULT ''")
         addColumnIfMissing(table: "spans", column: "shortcuts", decl: "TEXT NOT NULL DEFAULT ''")
         addColumnIfMissing(table: "spans", column: "fields", decl: "TEXT NOT NULL DEFAULT ''")
+        addColumnIfMissing(table: "spans", column: "page_host", decl: "TEXT NOT NULL DEFAULT ''")
 
         exec("""
             CREATE TABLE IF NOT EXISTS screenshots (
@@ -129,6 +130,40 @@ final class Store {
             );
             """)
         exec("CREATE INDEX IF NOT EXISTS idx_idle_start ON idle_sessions(start);")
+
+        // Intent labels: one row per span, written by the labeler once a
+        // session has closed. No foreign key (codebase convention); orphans are
+        // swept when spans are deleted.
+        exec("""
+            CREATE TABLE IF NOT EXISTS span_labels (
+                span_id INTEGER PRIMARY KEY,
+                session_key TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                title_key TEXT NOT NULL DEFAULT '',
+                intent TEXT NOT NULL,
+                canon TEXT NOT NULL,
+                source INTEGER NOT NULL DEFAULT 0,
+                model TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL,
+                is_demo INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        exec("CREATE INDEX IF NOT EXISTS idx_labels_unit ON span_labels(is_demo, unit);")
+
+        // Site icons found in the browser's own favicon cache. Demo and live
+        // share hosts, so no is_demo.
+        exec("""
+            CREATE TABLE IF NOT EXISTS site_icons (
+                host TEXT PRIMARY KEY,
+                domain TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                width INTEGER NOT NULL DEFAULT 0,
+                fetched REAL NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        exec("CREATE INDEX IF NOT EXISTS idx_site_icons_domain ON site_icons(domain);")
     }
 
     /// SQLite has no ADD COLUMN IF NOT EXISTS; check the schema first.
@@ -164,7 +199,7 @@ final class Store {
     func insert(_ span: ActivitySpan) -> Int64 {
         queue.sync {
             var stmt: OpaquePointer?
-            let sql = "INSERT INTO spans (bundle_id, app_name, window_title, start, end, is_demo, keystrokes, clicks, doc_path, shortcuts, fields) VALUES (?,?,?,?,?,?,?,?,?,?,?);"
+            let sql = "INSERT INTO spans (bundle_id, app_name, window_title, start, end, is_demo, keystrokes, clicks, doc_path, shortcuts, fields, page_host) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
             defer { sqlite3_finalize(stmt) }
             bindSpan(span, to: stmt)
@@ -177,7 +212,7 @@ final class Store {
         queue.sync {
             exec("BEGIN TRANSACTION;")
             var stmt: OpaquePointer?
-            let sql = "INSERT INTO spans (bundle_id, app_name, window_title, start, end, is_demo, keystrokes, clicks, doc_path, shortcuts, fields) VALUES (?,?,?,?,?,?,?,?,?,?,?);"
+            let sql = "INSERT INTO spans (bundle_id, app_name, window_title, start, end, is_demo, keystrokes, clicks, doc_path, shortcuts, fields, page_host) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
                 exec("ROLLBACK;")
                 return
@@ -204,11 +239,35 @@ final class Store {
         sqlite3_bind_text(stmt, 9, span.documentPath, -1, Store.SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 10, span.shortcuts, -1, Store.SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 11, span.fields, -1, Store.SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 12, span.pageHost, -1, Store.SQLITE_TRANSIENT)
+    }
+
+    /// The column list every span reader selects, in `spanRow` order.
+    /// Table-qualified, so the list is safe inside joins (span_labels has is_demo too).
+    private static let spanColumns = "spans.id, spans.bundle_id, spans.app_name, spans.window_title, spans.start, spans.end, spans.is_demo, spans.keystrokes, spans.clicks, spans.doc_path, spans.shortcuts, spans.fields, spans.page_host"
+
+    private func spanRow(_ stmt: OpaquePointer?) -> ActivitySpan {
+        ActivitySpan(
+            id: sqlite3_column_int64(stmt, 0),
+            bundleID: String(cString: sqlite3_column_text(stmt, 1)),
+            appName: String(cString: sqlite3_column_text(stmt, 2)),
+            windowTitle: String(cString: sqlite3_column_text(stmt, 3)),
+            start: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+            end: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+            isDemo: sqlite3_column_int(stmt, 6) == 1,
+            keystrokes: Int(sqlite3_column_int(stmt, 7)),
+            clicks: Int(sqlite3_column_int(stmt, 8)),
+            documentPath: sqlite3_column_text(stmt, 9).map { String(cString: $0) } ?? "",
+            shortcuts: sqlite3_column_text(stmt, 10).map { String(cString: $0) } ?? "",
+            fields: sqlite3_column_text(stmt, 11).map { String(cString: $0) } ?? "",
+            pageHost: sqlite3_column_text(stmt, 12).map { String(cString: $0) } ?? ""
+        )
     }
 
     func deleteAll(demoOnly: Bool = false) {
         queue.sync {
             exec(demoOnly ? "DELETE FROM spans WHERE is_demo = 1;" : "DELETE FROM spans;")
+            exec("DELETE FROM span_labels WHERE span_id NOT IN (SELECT id FROM spans);")
             purgeDeletedBytes()
         }
     }
@@ -216,6 +275,7 @@ final class Store {
     func deleteLiveData() {
         queue.sync {
             exec("DELETE FROM spans WHERE is_demo = 0;")
+            exec("DELETE FROM span_labels WHERE span_id NOT IN (SELECT id FROM spans);")
             purgeDeletedBytes()
         }
     }
@@ -235,33 +295,13 @@ final class Store {
         queue.sync {
             var out: [ActivitySpan] = []
             var stmt: OpaquePointer?
-            let sql = """
-                SELECT id, bundle_id, app_name, window_title, start, end, is_demo, keystrokes, clicks, doc_path, shortcuts, fields
-                FROM spans
-                WHERE end > ? AND start < ? AND is_demo = ?
-                ORDER BY start ASC;
-                """
+            let sql = "SELECT \(Store.spanColumns) FROM spans WHERE end > ? AND start < ? AND is_demo = ? ORDER BY start ASC;"
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
             sqlite3_bind_double(stmt, 2, to.timeIntervalSince1970)
             sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                out.append(ActivitySpan(
-                    id: sqlite3_column_int64(stmt, 0),
-                    bundleID: String(cString: sqlite3_column_text(stmt, 1)),
-                    appName: String(cString: sqlite3_column_text(stmt, 2)),
-                    windowTitle: String(cString: sqlite3_column_text(stmt, 3)),
-                    start: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
-                    end: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
-                    isDemo: sqlite3_column_int(stmt, 6) == 1,
-                    keystrokes: Int(sqlite3_column_int(stmt, 7)),
-                    clicks: Int(sqlite3_column_int(stmt, 8)),
-                    documentPath: sqlite3_column_text(stmt, 9).map { String(cString: $0) } ?? "",
-                    shortcuts: sqlite3_column_text(stmt, 10).map { String(cString: $0) } ?? "",
-                    fields: sqlite3_column_text(stmt, 11).map { String(cString: $0) } ?? ""
-                ))
-            }
+            while sqlite3_step(stmt) == SQLITE_ROW { out.append(spanRow(stmt)) }
             return out
         }
     }
@@ -467,6 +507,30 @@ final class Store {
             exec("DELETE FROM narratives \(predicate);")
             purgeDeletedBytes()
             return paths.filter { !$0.isEmpty }
+        }
+    }
+
+    /// Drops the IMAGES of narratives older than `cutoff` — the text stays, the
+    /// frame goes — returning the file paths to delete.
+    @discardableResult
+    func pruneNarrativeImages(olderThan cutoff: Date) -> [String] {
+        queue.sync {
+            var paths: [String] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT image_path FROM narratives WHERE ts < ? AND is_demo = 0 AND image_path <> '';", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let c = sqlite3_column_text(stmt, 0) { paths.append(String(cString: c)) }
+                }
+            }
+            sqlite3_finalize(stmt)
+            var upd: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE narratives SET image_path = '' WHERE ts < ? AND is_demo = 0 AND image_path <> '';", -1, &upd, nil) == SQLITE_OK {
+                sqlite3_bind_double(upd, 1, cutoff.timeIntervalSince1970)
+                sqlite3_step(upd)
+            }
+            sqlite3_finalize(upd)
+            return paths
         }
     }
 
@@ -745,6 +809,340 @@ final class Store {
             case .all: exec("DELETE FROM idle_sessions;")
             }
             purgeDeletedBytes()
+        }
+    }
+
+    // MARK: - Span labels (intent titles)
+
+    /// Writes (or replaces) one label row per span, atomically.
+    func insertSpanLabels(_ labels: [SpanLabel]) {
+        guard !labels.isEmpty else { return }
+        queue.sync {
+            exec("BEGIN TRANSACTION;")
+            var stmt: OpaquePointer?
+            let sql = "INSERT OR REPLACE INTO span_labels (span_id, session_key, unit, title_key, intent, canon, source, model, created, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { exec("ROLLBACK;"); return }
+            for l in labels {
+                sqlite3_bind_int64(stmt, 1, l.spanID)
+                sqlite3_bind_text(stmt, 2, l.sessionKey, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, l.unit, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 4, l.titleKey, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 5, l.intent, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 6, l.canon, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 7, Int32(l.source.rawValue))
+                sqlite3_bind_text(stmt, 8, l.model, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_double(stmt, 9, l.created.timeIntervalSince1970)
+                sqlite3_bind_int(stmt, 10, l.isDemo ? 1 : 0)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+            sqlite3_finalize(stmt)
+            exec("COMMIT;")
+        }
+    }
+
+    private static let labelColumns = "l.span_id, l.session_key, l.unit, l.title_key, l.intent, l.canon, l.source, l.model, l.created, l.is_demo"
+
+    private func labelRow(_ stmt: OpaquePointer?) -> SpanLabel {
+        SpanLabel(
+            spanID: sqlite3_column_int64(stmt, 0),
+            sessionKey: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+            unit: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "",
+            titleKey: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+            intent: sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? "",
+            canon: sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? "",
+            source: LabelSource(rawValue: Int(sqlite3_column_int(stmt, 6))) ?? .fallback,
+            model: sqlite3_column_text(stmt, 7).map { String(cString: $0) } ?? "",
+            created: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8)),
+            isDemo: sqlite3_column_int(stmt, 9) == 1
+        )
+    }
+
+    /// Labels of the spans overlapping [from, to), keyed by span id.
+    func spanLabels(from: Date, to: Date, demo: Bool) -> [Int64: SpanLabel] {
+        queue.sync {
+            var out: [Int64: SpanLabel] = [:]
+            var stmt: OpaquePointer?
+            let sql = "SELECT \(Store.labelColumns) FROM span_labels l JOIN spans s ON s.id = l.span_id WHERE s.end > ? AND s.start < ? AND l.is_demo = ?;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [:] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, to.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let l = labelRow(stmt)
+                out[l.spanID] = l
+            }
+            return out
+        }
+    }
+
+    /// Spans with no label yet that ended in [from, before) — `before` is the
+    /// grace cut-off, so a session that may still grow isn't named early.
+    /// Newest first, so what the user is looking at is labelled first.
+    func unlabelledSpans(from: Date, before: Date, demo: Bool, limit: Int) -> [ActivitySpan] {
+        queue.sync {
+            var out: [ActivitySpan] = []
+            var stmt: OpaquePointer?
+            let sql = """
+                SELECT \(Store.spanColumns) FROM spans
+                LEFT JOIN span_labels l ON l.span_id = spans.id
+                WHERE l.span_id IS NULL AND spans.end > ? AND spans.end < ? AND spans.is_demo = ?
+                ORDER BY spans.start DESC LIMIT ?;
+                """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, before.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
+            sqlite3_bind_int(stmt, 4, Int32(limit))
+            while sqlite3_step(stmt) == SQLITE_ROW { out.append(spanRow(stmt)) }
+            return out
+        }
+    }
+
+    /// Distinct model-made task titles for a unit, most recently used first —
+    /// the "existing tasks" a new session may be matched to.
+    func canonTitles(unit: String, demo: Bool, limit: Int) -> [String] {
+        queue.sync {
+            var out: [String] = []
+            var stmt: OpaquePointer?
+            let sql = "SELECT canon, MAX(created) AS latest FROM span_labels WHERE unit = ? AND is_demo = ? AND source = ? GROUP BY canon ORDER BY latest DESC LIMIT ?;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, unit, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 2, demo ? 1 : 0)
+            sqlite3_bind_int(stmt, 3, Int32(LabelSource.model.rawValue))
+            sqlite3_bind_int(stmt, 4, Int32(limit))
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let c = sqlite3_column_text(stmt, 0) { out.append(String(cString: c)) }
+            }
+            return out
+        }
+    }
+
+    /// The label of a labelled span of `unit` with the same title key that ended
+    /// within `gap` before the session started, or started within `gap` after it
+    /// ended — the other half of the same sitting, whichever side it fell on.
+    /// Nearest first.
+    func neighbourLabel(unit: String, titleKey: String, sessionStart: Date, sessionEnd: Date, gap: TimeInterval, demo: Bool) -> SpanLabel? {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = """
+                SELECT \(Store.labelColumns) FROM span_labels l JOIN spans s ON s.id = l.span_id
+                WHERE l.unit = ? AND l.title_key = ? AND l.is_demo = ?
+                  AND ((s.end >= ? AND s.end <= ?) OR (s.start >= ? AND s.start <= ?))
+                ORDER BY MIN(ABS(s.end - ?), ABS(s.start - ?)) ASC LIMIT 1;
+                """
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            let start = sessionStart.timeIntervalSince1970, end = sessionEnd.timeIntervalSince1970
+            sqlite3_bind_text(stmt, 1, unit, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, titleKey, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
+            sqlite3_bind_double(stmt, 4, start - gap)
+            sqlite3_bind_double(stmt, 5, start + 1)
+            sqlite3_bind_double(stmt, 6, end - 1)
+            sqlite3_bind_double(stmt, 7, end + gap)
+            sqlite3_bind_double(stmt, 8, start)
+            sqlite3_bind_double(stmt, 9, end)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return labelRow(stmt)
+        }
+    }
+
+    /// Renames every span of a sitting — used when a later half of the sitting
+    /// brought the evidence that names it.
+    func relabelSession(sessionKey: String, intent: String, canon: String, source: LabelSource, model: String) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "UPDATE span_labels SET intent = ?, canon = ?, source = ?, model = ? WHERE session_key = ?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, intent, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, canon, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 3, Int32(source.rawValue))
+            sqlite3_bind_text(stmt, 4, model, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, sessionKey, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+        }
+    }
+
+    func spanLabelCount(demo: Bool) -> Int {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM span_labels WHERE is_demo = ?;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, demo ? 1 : 0)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return Int(sqlite3_column_int64(stmt, 0))
+        }
+    }
+
+    /// Highest span id — a cheap "anything new since last time?" check.
+    func maxSpanID(demo: Bool) -> Int64 {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COALESCE(MAX(id), 0) FROM spans WHERE is_demo = ?;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, demo ? 1 : 0)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return sqlite3_column_int64(stmt, 0)
+        }
+    }
+
+    func deleteSpanLabels(scope: DeleteScope) {
+        queue.sync {
+            switch scope {
+            case .live: exec("DELETE FROM span_labels WHERE is_demo = 0;")
+            case .demo: exec("DELETE FROM span_labels WHERE is_demo = 1;")
+            case .all: exec("DELETE FROM span_labels;")
+            }
+            purgeDeletedBytes()
+        }
+    }
+
+    // MARK: - Site icons
+
+    func upsertSiteIcon(_ icon: SiteIcon) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = "INSERT OR REPLACE INTO site_icons (host, domain, path, source, width, fetched, attempts) VALUES (?,?,?,?,?,?,?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, icon.host, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, icon.domain, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, icon.path, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, icon.source, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int(stmt, 5, Int32(icon.width))
+            sqlite3_bind_double(stmt, 6, icon.fetched.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 7, Int32(icon.attempts))
+            sqlite3_step(stmt)
+        }
+    }
+
+    private func siteIconRow(_ stmt: OpaquePointer?) -> SiteIcon {
+        SiteIcon(
+            host: String(cString: sqlite3_column_text(stmt, 0)),
+            domain: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+            path: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "",
+            source: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+            width: Int(sqlite3_column_int(stmt, 4)),
+            fetched: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+            attempts: Int(sqlite3_column_int(stmt, 6))
+        )
+    }
+
+    func siteIcon(host: String) -> SiteIcon? {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT host, domain, path, source, width, fetched, attempts FROM site_icons WHERE host = ?;", -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, host, -1, Store.SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return siteIconRow(stmt)
+        }
+    }
+
+    /// The best icon on file for a domain (widest, non-empty), if any.
+    func siteIcon(domain: String) -> SiteIcon? {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT host, domain, path, source, width, fetched, attempts FROM site_icons WHERE domain = ? AND path <> '' ORDER BY width DESC LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, domain, -1, Store.SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return siteIconRow(stmt)
+        }
+    }
+
+    func siteIcons() -> [SiteIcon] {
+        queue.sync {
+            var out: [SiteIcon] = []
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT host, domain, path, source, width, fetched, attempts FROM site_icons;", -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW { out.append(siteIconRow(stmt)) }
+            return out
+        }
+    }
+
+    /// Removes every site icon row, returning the files to delete.
+    @discardableResult
+    func deleteSiteIcons() -> [String] {
+        queue.sync {
+            var paths: [String] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT path FROM site_icons WHERE path <> '';", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let c = sqlite3_column_text(stmt, 0) { paths.append(String(cString: c)) }
+                }
+            }
+            sqlite3_finalize(stmt)
+            exec("DELETE FROM site_icons;")
+            purgeDeletedBytes()
+            return paths
+        }
+    }
+
+    // MARK: - Cleanup of system-process rows
+
+    private static func placeholders(_ n: Int) -> String { Array(repeating: "?", count: n).joined(separator: ",") }
+
+    /// Deletes live spans recorded for the given bundle ids (system agents that
+    /// slipped in before they were filtered), and the labels that hung off them.
+    @discardableResult
+    func deleteSpans(bundleIDs: Set<String>) -> Int {
+        guard !bundleIDs.isEmpty else { return 0 }
+        return queue.sync {
+            let ids = bundleIDs.sorted()
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "DELETE FROM spans WHERE is_demo = 0 AND bundle_id IN (\(Store.placeholders(ids.count)));", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            for (i, b) in ids.enumerated() { sqlite3_bind_text(stmt, Int32(i + 1), b, -1, Store.SQLITE_TRANSIENT) }
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+            let n = Int(sqlite3_changes(db))
+            if n > 0 {
+                exec("DELETE FROM span_labels WHERE span_id NOT IN (SELECT id FROM spans);")
+                purgeDeletedBytes()
+            }
+            return n
+        }
+    }
+
+    /// Deletes live narratives captured under the given app names, returning
+    /// their image paths for on-disk removal.
+    @discardableResult
+    func deleteNarratives(appNames: Set<String>) -> [String] {
+        guard !appNames.isEmpty else { return [] }
+        return queue.sync {
+            let names = appNames.sorted()
+            var paths: [String] = []
+            var sel: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT image_path FROM narratives WHERE is_demo = 0 AND app_name IN (\(Store.placeholders(names.count)));", -1, &sel, nil) == SQLITE_OK {
+                for (i, n) in names.enumerated() { sqlite3_bind_text(sel, Int32(i + 1), n, -1, Store.SQLITE_TRANSIENT) }
+                while sqlite3_step(sel) == SQLITE_ROW {
+                    if let c = sqlite3_column_text(sel, 0) { paths.append(String(cString: c)) }
+                }
+            }
+            sqlite3_finalize(sel)
+            var del: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM narratives WHERE is_demo = 0 AND app_name IN (\(Store.placeholders(names.count)));", -1, &del, nil) == SQLITE_OK {
+                for (i, n) in names.enumerated() { sqlite3_bind_text(del, Int32(i + 1), n, -1, Store.SQLITE_TRANSIENT) }
+                sqlite3_step(del)
+            }
+            sqlite3_finalize(del)
+            if !paths.isEmpty || sqlite3_changes(db) > 0 { purgeDeletedBytes() }
+            return paths.filter { !$0.isEmpty }
+        }
+    }
+
+    /// Strips invisible Unicode format marks from stored app names
+    /// ("\u{200E}WhatsApp") so old rows group with new ones.
+    func normaliseAppNames() {
+        queue.sync {
+            for table in ["spans", "narratives", "screenshots"] {
+                exec("UPDATE \(table) SET app_name = trim(replace(replace(replace(app_name, char(8206), ''), char(8207), ''), char(8203), '')) WHERE app_name LIKE '%' || char(8206) || '%' OR app_name LIKE '%' || char(8207) || '%' OR app_name LIKE '%' || char(8203) || '%';")
+            }
         }
     }
 

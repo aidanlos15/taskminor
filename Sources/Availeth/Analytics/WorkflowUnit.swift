@@ -57,6 +57,10 @@ enum WorkflowUnit {
         return words.isEmpty ? nil : String(words)
     }
 
+    /// Every service name the title matcher can produce — so the logo assets
+    /// can be checked against it.
+    static var serviceNames: [String] { knownServices.map(\.0) }
+
     private static let knownServices: [(String, [String])] = [
         ("NetSuite", ["netsuite"]), ("Salesforce", ["salesforce", "lightning.force"]),
         ("Gmail", ["gmail"]), ("Google Docs", ["google docs"]), ("Google Sheets", ["google sheets"]),

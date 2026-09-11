@@ -78,9 +78,17 @@ final class CaptureEngine: ObservableObject {
     @Published var fileTrackingEnabled: Bool {
         didSet { UserDefaults.standard.set(fileTrackingEnabled, forKey: "availeth.cap.files") }
     }
+    /// Which site a browser tab is on — the host only, read from the address
+    /// via Accessibility when a browser span opens — so a task can show the
+    /// site's own icon (from the browser's local icon cache; nothing is fetched).
+    @Published var siteIdentityEnabled: Bool {
+        didSet { UserDefaults.standard.set(siteIdentityEnabled, forKey: "availeth.cap.sites") }
+    }
 
     /// How long redacted screenshots are kept before automatic deletion.
     var screenshotRetention: TimeInterval = 24 * 3600
+    /// How long the storyline TEXT (what the model saw, no image) is kept.
+    var narrativeTextRetention: TimeInterval = 90 * 24 * 3600
     /// Never capture more often than this, even when the context changes. Short
     /// for storyline (frame grab is cheap and queued) so fast app-switches in a
     /// workflow — e.g. Notes ⇄ a browser tab — are all captured.
@@ -143,7 +151,7 @@ final class CaptureEngine: ObservableObject {
     private var observers: [NSObjectProtocol] = []
 
     /// The span currently being accumulated.
-    private var openSpan: (bundleID: String, appName: String, title: String, start: Date, docPath: String)?
+    private var openSpan: (bundleID: String, appName: String, title: String, start: Date, docPath: String, host: String)?
     /// Raw title seen on the previous tick — a new title must be stable for two
     /// consecutive ticks before it splits the span (defeats ticking-clock titles).
     private var previousTickTitle: String?
@@ -183,6 +191,7 @@ final class CaptureEngine: ObservableObject {
             screenshotMode = .storyline // default for a fresh install
         }
         fileTrackingEnabled = defaults.bool(forKey: "availeth.cap.files")
+        siteIdentityEnabled = defaults.object(forKey: "availeth.cap.sites") as? Bool ?? true
         captureDepth = defaults.string(forKey: "availeth.cap.depth").flatMap(CaptureDepth.init) ?? .detailed
 
         // Exclusions: nothing is excluded by default now. The version-3 migration
@@ -280,6 +289,9 @@ final class CaptureEngine: ObservableObject {
     }
 
     private let axQueue = DispatchQueue(label: "com.availeth.ax")
+    /// Page-URL reads walk a browser's tree for up to 1.5 s — kept off axQueue so
+    /// the typing-triggered field refresh never waits behind them.
+    private let pageQueue = DispatchQueue(label: "com.availeth.ax.page", qos: .utility)
 
     /// Starts/stops the input monitor to match the mode and the FULLY-live state
     /// (observing, not paused, not suspended). The monitor is torn down whenever
@@ -488,7 +500,17 @@ final class CaptureEngine: ObservableObject {
             return
         }
 
-        let appName = front.localizedName ?? bundleID
+        // System pieces — the lock screen, a Wi-Fi sign-in sheet, a password
+        // prompt — are not work. Nothing is recorded while one is in front.
+        if SystemProcesses.isSystem(front) {
+            closeOpenSpan()
+            inputMonitor.setCounting(false)
+            setCurrentAppName("System")
+            publishObservedToday()
+            return
+        }
+
+        let appName = SystemProcesses.cleanAppName(front.localizedName ?? bundleID)
         let pid = front.processIdentifier
         let rawTitle = AXReader.focusedWindowTitle(pid: pid) ?? ""
         setCurrentAppName(appName)
@@ -527,7 +549,34 @@ final class CaptureEngine: ObservableObject {
         // File identity (path only, never contents) — read once when the span opens.
         let docPath = (fileTrackingEnabled ? AXReader.focusedDocumentPath(pid: pid) : nil) ?? ""
         inputMonitor.reset() // start counting fresh for this span
-        openSpan = (bundleID, appName, rawTitle, now, docPath)
+        openSpan = (bundleID, appName, rawTitle, now, docPath, "")
+        if siteIdentityEnabled, WorkflowUnit.browsers.contains(appName) {
+            captureSiteIdentityAsync(pid: pid, bundleID: bundleID, spanStart: now)
+        }
+    }
+
+    /// Off-main Accessibility read of the tab's page URL when a browser span
+    /// opens. Only the host is kept, on the span; the URL is handed once to the
+    /// icon store and dropped. Chromium builds its web tree lazily, so a miss is
+    /// retried once. Nothing happens if the span has already closed.
+    private func captureSiteIdentityAsync(pid: pid_t, bundleID: String, spanStart: Date, attempt: Int = 0) {
+        pageQueue.async { [weak self] in
+            let url = AXReader.focusedPageURL(pid: pid)
+            DispatchQueue.main.async {
+                guard let self, var span = self.openSpan, span.bundleID == bundleID, span.start == spanStart else { return }
+                guard let url, let host = HostNormalizer.host(of: url) else {
+                    if attempt == 0 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                            self?.captureSiteIdentityAsync(pid: pid, bundleID: bundleID, spanStart: spanStart, attempt: 1)
+                        }
+                    }
+                    return
+                }
+                span.host = host
+                self.openSpan = span
+                SiteIconStore.shared.request(host: host, pageURL: url)
+            }
+        }
     }
 
     private func closeOpenSpan(end: Date? = nil) {
@@ -549,7 +598,8 @@ final class CaptureEngine: ObservableObject {
             clicks: telemetryOn ? input.clicks : 0,
             documentPath: span.docPath,
             shortcuts: telemetryOn ? input.shortcuts : "",
-            fields: telemetryOn ? input.fields : ""
+            fields: telemetryOn ? input.fields : "",
+            pageHost: span.host
         ))
         refreshSavedToday()
         onSpanSaved?()
@@ -756,10 +806,15 @@ final class CaptureEngine: ObservableObject {
 
     /// Storyline: capture → local model narrates → store text → discard image.
     /// The PNG never touches disk; it lives only for the duration of the call.
+    /// Storyline retention in two tiers: the captured FRAME goes after
+    /// `screenshotRetention` (24 h — "reads the screen, then deletes the image"),
+    /// the one-paragraph TEXT stays for `narrativeTextRetention` so a workflow
+    /// or task from last week still opens onto what actually happened.
     private func pruneOldNarratives() {
-        let cutoff = Date().addingTimeInterval(-screenshotRetention)
-        let paths = store.pruneNarratives(olderThan: cutoff)
-        ScreenshotCapture.deleteFiles(paths)
+        let imageCutoff = Date().addingTimeInterval(-screenshotRetention)
+        ScreenshotCapture.deleteFiles(store.pruneNarrativeImages(olderThan: imageCutoff))
+        let textCutoff = Date().addingTimeInterval(-narrativeTextRetention)
+        ScreenshotCapture.deleteFiles(store.pruneNarratives(olderThan: textCutoff))
     }
 
     /// Records the away stretch (if long enough) when the user returns.

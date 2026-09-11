@@ -30,26 +30,6 @@ struct StatCard: View {
     }
 }
 
-/// Small muted tag for an app/site name, used in workflow chains and lists.
-struct AppChip: View {
-    var name: String
-
-    var body: some View {
-        Text(shortName)
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(AppPalette.color(for: name).opacity(0.16)))
-            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(AppPalette.color(for: name).opacity(0.28), lineWidth: 1))
-            .foregroundStyle(AppPalette.color(for: name))
-    }
-
-    private var shortName: String {
-        name.replacingOccurrences(of: "Microsoft ", with: "")
-            .replacingOccurrences(of: "Google ", with: "")
-    }
-}
-
 /// Empty-state placeholder used when a view has no data yet.
 struct EmptyState: View {
     var icon: String

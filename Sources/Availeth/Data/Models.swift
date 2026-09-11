@@ -57,6 +57,10 @@ struct ActivitySpan: Identifiable, Equatable {
     /// "Invoice Number [identifier], Amount [currency]". Labels are on-screen UI
     /// text; classes are derived from those labels, never from typed characters.
     var fields: String = ""
+    /// For browser spans: the host of the page in the tab (e.g. "onlinebanking.aib.ie"),
+    /// read from the address via Accessibility when site identity is on. Never the
+    /// full URL — no paths, queries or tokens — and "" for every other span.
+    var pageHost: String = ""
 
     var duration: TimeInterval { end.timeIntervalSince(start) }
 
@@ -231,12 +235,79 @@ struct DetailedTask: Identifiable, Equatable {
     var title: String
     var appUnit: String
     var duration: TimeInterval
+    /// Distinct sittings (runs of spans with no gap over five minutes) — not
+    /// refocus counts, so "6 sessions" means six times the work was picked up.
     var sessions: Int
     var lastSeen: Date
     /// Detailed content moments captured during this task, time-ordered.
     var moments: [SceneNarrative]
     /// A short snippet for the collapsed row (from the richest moment).
     var preview: String
+    /// Where the title came from: the window itself, the local model reading
+    /// what was on screen, or a plain fallback when there was nothing to read.
+    var source: LabelSource = .title
+    /// Each sitting, oldest first, with the window title it was seen under.
+    var runs: [SessionRun] = []
+    /// Distinct window titles merged into this task (for search and audit).
+    var variants: [String] = []
+}
+
+/// One sitting of a task.
+struct SessionRun: Equatable {
+    var start: Date
+    var end: Date
+    var windowTitle: String
+    var spanCount: Int
+    var duration: TimeInterval { end.timeIntervalSince(start) }
+}
+
+/// Provenance of a task title.
+enum LabelSource: Int, Equatable {
+    /// The window title said what the work was; used as-is.
+    case title = 0
+    /// Named by the local model from what was captured on screen.
+    case model = 1
+    /// Nothing to read (no captured detail) — the bare app/site name.
+    case fallback = 2
+}
+
+/// The intent label for one span: which task its session was, as named by the
+/// local model (or passed through from an informative window title). Persisted
+/// so titles are stable across reloads and never recomputed on the view path.
+struct SpanLabel: Identifiable, Equatable {
+    var id: Int64 { spanID }
+    var spanID: Int64
+    /// "<unit>\u{1F}<first span id of the session>" — groups the spans of one sitting.
+    var sessionKey: String
+    var unit: String
+    /// LabelKey.canonKey of the cleaned window title — for adopting a neighbour's label.
+    var titleKey: String
+    /// What the model (or the title) said, verbatim after cleaning.
+    var intent: String
+    /// The merged task title shown in the row (an existing title when the
+    /// session was judged the same piece of work).
+    var canon: String
+    var source: LabelSource
+    var model: String = ""
+    var created: Date
+    var isDemo: Bool = false
+}
+
+/// A site's icon, obtained from the browser's own on-disk favicon cache and
+/// stored as a file under Application Support/Availeth/favicons. `path` is ""
+/// for a negative result (looked, nothing there yet) so it isn't retried on
+/// every reload.
+struct SiteIcon: Identifiable, Equatable {
+    var id: String { host }
+    var host: String
+    /// Registrable domain (aib.ie for onlinebanking.aib.ie) — the icon key.
+    var domain: String
+    var path: String
+    /// Which cache it came from: "chromium", "firefox", "safari", or "".
+    var source: String
+    var width: Int
+    var fetched: Date
+    var attempts: Int
 }
 
 /// Time spent per hour-of-day, split by app, for the timeline chart.

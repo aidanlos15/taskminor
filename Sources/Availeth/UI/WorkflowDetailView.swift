@@ -9,6 +9,9 @@ struct WorkflowDetailView: View {
     /// Whether Storyline capture is currently enabled — so an empty walkthrough
     /// shows the right message (it's on but nothing landed yet, vs. it's off).
     var storylineOn: Bool = false
+    /// unit → bundle id / page host, for the real app and site logos.
+    var bundles: [String: String] = [:]
+    var sites: [String: String] = [:]
 
     private var pattern: WorkflowPattern { insight.pattern }
 
@@ -110,12 +113,18 @@ struct WorkflowDetailView: View {
             VStack(spacing: 0) {
                 ForEach(insight.steps) { step in
                     HStack(alignment: .top, spacing: 12) {
+                        // Plain step number, then the app's (or site's) real logo.
+                        Text("\(step.id + 1)")
+                            .font(.system(size: 12.5, weight: .semibold)).numeric()
+                            .foregroundStyle(Theme.ink)
+                            .frame(width: 16, alignment: .trailing)
+                            .padding(.top, 6)
                         ZStack {
-                            Circle().fill(AppPalette.color(for: step.app).opacity(0.18)).frame(width: 26, height: 26)
-                            Text("\(step.id + 1)")
-                                .font(.system(size: 11, weight: .bold)).numeric()
-                                .foregroundStyle(AppPalette.color(for: step.app))
+                            RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.panelHi)
+                            AppLogoView(unit: step.app, bundleID: bundles[step.app], site: sites[step.app], size: 17)
                         }
+                        .frame(width: 28, height: 28)
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.line, lineWidth: 1))
                         VStack(alignment: .leading, spacing: 3) {
                             Text(step.app)
                                 .font(.system(size: 13, weight: .medium))
@@ -140,7 +149,7 @@ struct WorkflowDetailView: View {
                     }
                     .padding(.vertical, 7)
                     if step.id < insight.steps.count - 1 {
-                        HStack { Rectangle().fill(Theme.line2).frame(width: 1, height: 12).padding(.leading, 12); Spacer() }
+                        HStack { Rectangle().fill(Theme.line2).frame(width: 1, height: 12).padding(.leading, 41.5); Spacer() }
                     }
                 }
             }
@@ -196,7 +205,7 @@ struct WorkflowDetailView: View {
                 Label("No screen detail for these runs yet", systemImage: "clock.arrow.circlepath")
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text("Storyline is on, but no screen captures are attached to this workflow's specific occurrences — either these runs happened before you enabled Storyline, or they were too brief to sample. It fills in as the workflow recurs from here.")
+                Text("Screen capture is on, but nothing captured is attached to this workflow's specific occurrences — these runs happened before screen capture was keeping text for them, or they were too brief to sample. It fills in as the workflow recurs from here.")
                     .font(.system(size: 12.5)).foregroundStyle(Theme.ink2).fixedSize(horizontal: false, vertical: true)
             } else {
                 Label("Turn on Storyline for screenshots", systemImage: "camera.viewfinder")

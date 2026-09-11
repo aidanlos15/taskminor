@@ -180,7 +180,7 @@ struct PrivacyView: View {
     @State private var inputMonitoringGranted = Permissions.inputMonitoringGranted
 
     private var capabilitiesCard: some View {
-        Card(title: "Additional capture", subtitle: "Off by default · shown in the Logs tab") {
+        Card(title: "Additional capture", subtitle: "Each can be switched off · shown in the Logs tab") {
             // Keyboard & mouse — a single on/off (on = the richest signal, which
             // reads field labels but never the keys you press).
             captureRow(
@@ -255,6 +255,28 @@ struct PrivacyView: View {
                                           AXReader.requestTrust()
                                           openSettings("com.apple.preference.security?Privacy_Accessibility")
                                       })
+                }
+            }
+
+            hairline
+
+            // Website identity — the host of a browser tab, so the task can show
+            // the site's own icon. Icons come from the browser's cache on this
+            // Mac; nothing is fetched from the internet.
+            captureRow(
+                icon: "globe",
+                title: "Website identity (icons only)",
+                description: "Only the site's host name (e.g. onlinebanking.aib.ie) — never the full address or the page — so tasks show the site's own icon, read from your browser's icon cache on this Mac.",
+                on: Binding(get: { state.engine.siteIdentityEnabled }, set: { state.engine.siteIdentityEnabled = $0 })
+            ) {
+                if state.engine.siteIdentityEnabled && !axTrusted {
+                    permissionWarning("Needs Window-title capture (Accessibility) to read the tab address.",
+                                      grant: {
+                                          AXReader.requestTrust()
+                                          openSettings("com.apple.preference.security?Privacy_Accessibility")
+                                      })
+                } else if state.engine.siteIdentityEnabled {
+                    subNote("Chrome, Arc, Brave, Edge and Firefox need nothing extra. Safari's icons would need Full Disk Access, which Availeth never asks for. Nothing is fetched from the internet.")
                 }
             }
 

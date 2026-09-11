@@ -329,41 +329,72 @@ final class Synthesizer {
         return out.prefix(8).joined(separator: ", ")
     }
 
+    /// Asks for a STRUCTURED story — a one-line summary, then headed sections of
+    /// bullets and numbered steps — so the Story screen can show one line on the
+    /// card and a scannable account when opened.
     static func taskPrompt(group: [MinuteSummary], apps: [String]) -> String {
         let steps = group.enumerated().map { "\($0.offset + 1). \($0.element.text)" }.joined(separator: "\n")
         return """
-        These are consecutive minutes of one task an employee performed. Write a detailed account (4–6 sentences) of what they actually did, step by step, and the systems and data involved, so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
+        These are consecutive minutes of one task an employee performed. Write a structured, detailed account so a colleague could understand it and decide how to automate it. PRESERVE the concrete specifics from the minutes below — the exact screens, the fields and values, the questions asked. Then give a 3–6 word title.
 
         Apps involved: \(apps.joined(separator: ", "))
         Minute-by-minute:
         \(steps)
 
-        Reply EXACTLY in this format:
-        TITLE: <short title>
-        STORY: <4-6 detailed sentences preserving the specifics>
+        Reply EXACTLY in this format (plain text; use markdown ONLY as shown, no other decoration, no asterisks in the title):
+        TITLE: <3–6 word title>
+        SUMMARY: <one plain sentence, at most 20 words, saying what the task was>
+        STORY:
+        **📌 What happened**
+        - <one concrete thing they did, with the specifics>
+        - <another>
+        **🔁 Steps**
+        1. <first step, in order>
+        2. <next step>
+        **🛠️ Systems and data**
+        - <app or site — what it was used for, which fields or values>
+        **🤖 What a machine could do**
+        - <the mechanical part a machine could take over, or "Nothing — this needs judgement">
         """
     }
 
+    /// Parses TITLE / SUMMARY / STORY. Line breaks inside the story are KEPT so
+    /// the headed structure survives; the summary (if any) leads the story text
+    /// as its first line.
     static func parseTitleAndStory(_ raw: String?, fallbackApps: [String], fallbackStory: String? = nil) -> (title: String, story: String) {
         let fallbackTitle = (fallbackApps.first ?? "Work") + " workflow"
         let fbStory = fallbackStory ?? "Worked across \(fallbackApps.joined(separator: ", "))."
         guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (fallbackTitle, fbStory)
         }
-        var title = "", story = "", sawLabel = false
-        for line in raw.split(separator: "\n") {
+        var title = "", summary = "", storyLines: [String] = [], sawLabel = false, inStory = false
+        // A label only counts at the start of a line ("TITLE:", "**Summary**:",
+        // "## STORY:") — a bullet like "- Set the job title: Manager" is content.
+        let label = #/^[\s*#]*(?i:(title|summary|story))\s*\**\s*:\s*(.*)$/#
+        for line in StoryFormat.normalise(raw).split(separator: "\n") {
             let l = line.trimmingCharacters(in: .whitespaces)
-            if let r = l.range(of: "TITLE:", options: .caseInsensitive) {
-                title = String(l[r.upperBound...]).trimmingCharacters(in: .whitespaces); sawLabel = true
-            } else if let r = l.range(of: "STORY:", options: .caseInsensitive) {
-                let body = String(l[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                story = story.isEmpty ? body : story + " " + body // append, don't overwrite
+            if let m = l.firstMatch(of: label) {
+                let body = String(m.2)
+                switch m.1.lowercased() {
+                case "title":   title = plain(body); inStory = false
+                case "summary": summary = plain(body); inStory = false
+                default:
+                    let b = body.trimmingCharacters(in: .whitespaces)
+                    if !b.isEmpty, StoryFormat.clean(b).isEmpty == false { storyLines.append(b) }   // append, never overwrite
+                    inStory = true
+                }
                 sawLabel = true
-            } else if !story.isEmpty {
-                story += " " + l // continuation of the story
+            } else if !l.isEmpty {
+                // A model that skips "STORY:" but starts a headed section is still telling the story.
+                if !inStory, sawLabel, StoryFormat.isHeading(l) || StoryFormat.bulletBody(l) != nil || StoryFormat.stepBody(l) != nil {
+                    inStory = true
+                }
+                if inStory { storyLines.append(l) }                 // continuation, structure kept
             }
         }
         if title.isEmpty { title = fallbackTitle }
+        var story = storyLines.joined(separator: "\n")
+        if !summary.isEmpty { story = story.isEmpty ? summary : summary + "\n\n" + story }
         if story.isEmpty {
             // Use raw as the story ONLY if it carried no labels to leak; otherwise
             // fall back to the clean signal-derived sentence.
@@ -371,6 +402,10 @@ final class Synthesizer {
         }
         return (title, story)
     }
+
+    /// Title and summary are rendered as plain text, so every "**" goes — not
+    /// just a wrapping pair.
+    private static func plain(_ s: String) -> String { StoryFormat.plain(s) }
 
     private static func countOccurrences(of needles: [String], in blob: String) -> Int {
         var total = 0

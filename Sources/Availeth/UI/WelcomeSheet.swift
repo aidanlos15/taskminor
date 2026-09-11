@@ -199,6 +199,20 @@ struct WelcomeSheet: View {
                             .font(.caption).foregroundStyle(Theme.ink2)
                     }
                 }
+
+                Rectangle().fill(Theme.line).frame(height: 1)
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Website identity (icons only)").font(.callout.weight(.medium)).foregroundStyle(Theme.ink)
+                        Text("Only a browser tab's host name, so tasks show the site's own icon \u{2014} read from your browser's cache on this Mac, never the internet.")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(get: { state.engine.siteIdentityEnabled }, set: { state.engine.siteIdentityEnabled = $0 }))
+                        .toggleStyle(.switch).labelsHidden()
+                }
             }
         }
     }
