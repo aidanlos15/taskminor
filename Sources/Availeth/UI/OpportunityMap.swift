@@ -386,6 +386,43 @@ struct UnitChain: View {
 }
 
 /// AUTOMATABLE (accent) or NEEDS A PERSON (muted).
+/// The judgement pill: AUTOMATABLE / BUILD AN APP / STREAMLINE / NEEDS A PERSON.
+struct OpportunityPill: View {
+    var kind: Opportunity.Kind
+    private var color: Color {
+        switch kind {
+        case .integration: return Theme.good
+        case .customApp: return Theme.accent
+        case .streamline: return Theme.amber
+        case .manual: return Theme.ink3
+        }
+    }
+    var body: some View {
+        Text(kind.label)
+            .font(.system(size: 9.5, weight: .bold)).tracking(0.8)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(kind == .manual ? Theme.panelHi : color.opacity(0.14)))
+    }
+}
+
+/// Chips for the things a process is about ("staff", "shifts", "availability").
+struct EntityChips: View {
+    var entities: [String]
+    var body: some View {
+        WrapLayout(hSpacing: 6, vSpacing: 6) {
+            ForEach(entities, id: \.self) { e in
+                Text(e)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(Theme.ink2)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Theme.panelHi))
+                    .overlay(Capsule().strokeBorder(Theme.line, lineWidth: 1))
+            }
+        }
+    }
+}
+
 struct AutomationPill: View {
     var automatable: Bool
 

@@ -28,6 +28,8 @@
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>© 2026 Availeth. Local-only process discovery.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Availeth writes your exported automations to a folder on the Desktop.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Availeth reads window titles and document names to group your work into tasks. It never controls other apps.</string>
 </dict>

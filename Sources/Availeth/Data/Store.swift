@@ -164,6 +164,56 @@ final class Store {
             );
             """)
         exec("CREATE INDEX IF NOT EXISTS idx_site_icons_domain ON site_icons(domain);")
+
+        // Screen-recording segments (live only; the demo has no video).
+        exec("""
+            CREATE TABLE IF NOT EXISTS recordings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start REAL NOT NULL,
+                end REAL NOT NULL,
+                path TEXT NOT NULL,
+                bytes INTEGER NOT NULL DEFAULT 0,
+                keep INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        exec("CREATE INDEX IF NOT EXISTS idx_rec_start ON recordings(start);")
+        for c in ["display", "points_w", "points_h", "pixels_w", "pixels_h"] {
+            addColumnIfMissing(table: "recordings", column: c, decl: "INTEGER NOT NULL DEFAULT 0")
+        }
+
+        // The local model's read on each workflow/task: integration, custom app, …
+        exec("""
+            CREATE TABLE IF NOT EXISTS opportunities (
+                key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                headline TEXT NOT NULL,
+                rationale TEXT NOT NULL,
+                entities TEXT NOT NULL DEFAULT '',
+                confidence TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                created REAL NOT NULL,
+                evidence INTEGER NOT NULL DEFAULT 0,
+                is_demo INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+
+        // Timestamped interaction events (structure only).
+        exec("""
+            CREATE TABLE IF NOT EXISTS input_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                kind TEXT NOT NULL,
+                app_name TEXT NOT NULL DEFAULT '',
+                bundle_id TEXT NOT NULL DEFAULT '',
+                x REAL,
+                y REAL,
+                display INTEGER NOT NULL DEFAULT 0,
+                label TEXT NOT NULL DEFAULT '',
+                count INTEGER NOT NULL DEFAULT 1,
+                is_demo INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+        exec("CREATE INDEX IF NOT EXISTS idx_events_ts ON input_events(ts);")
     }
 
     /// SQLite has no ADD COLUMN IF NOT EXISTS; check the schema first.
@@ -1081,6 +1131,303 @@ final class Store {
             exec("DELETE FROM site_icons;")
             purgeDeletedBytes()
             return paths
+        }
+    }
+
+    // MARK: - Screen recordings
+
+    @discardableResult
+    func insertRecording(_ r: RecordingSegment) -> Int64 {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "INSERT INTO recordings (start, end, path, bytes, keep, display, points_w, points_h, pixels_w, pixels_h) VALUES (?,?,?,?,?,?,?,?,?,?);", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, r.start.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, r.end.timeIntervalSince1970)
+            sqlite3_bind_text(stmt, 3, r.path, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_int64(stmt, 4, r.bytes)
+            sqlite3_bind_int(stmt, 5, r.keep ? 1 : 0)
+            sqlite3_bind_int(stmt, 6, Int32(r.display))
+            sqlite3_bind_int(stmt, 7, Int32(r.pointsWidth))
+            sqlite3_bind_int(stmt, 8, Int32(r.pointsHeight))
+            sqlite3_bind_int(stmt, 9, Int32(r.pixelsWidth))
+            sqlite3_bind_int(stmt, 10, Int32(r.pixelsHeight))
+            guard sqlite3_step(stmt) == SQLITE_DONE else { return 0 }
+            return sqlite3_last_insert_rowid(db)
+        }
+    }
+
+    private func recordingRow(_ stmt: OpaquePointer?) -> RecordingSegment {
+        RecordingSegment(
+            id: sqlite3_column_int64(stmt, 0),
+            start: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+            end: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2)),
+            path: String(cString: sqlite3_column_text(stmt, 3)),
+            bytes: sqlite3_column_int64(stmt, 4),
+            keep: sqlite3_column_int(stmt, 5) == 1,
+            display: Int(sqlite3_column_int(stmt, 6)),
+            pointsWidth: Int(sqlite3_column_int(stmt, 7)),
+            pointsHeight: Int(sqlite3_column_int(stmt, 8)),
+            pixelsWidth: Int(sqlite3_column_int(stmt, 9)),
+            pixelsHeight: Int(sqlite3_column_int(stmt, 10))
+        )
+    }
+    private static let recordingColumns = "id, start, end, path, bytes, keep, display, points_w, points_h, pixels_w, pixels_h"
+
+    /// Segments overlapping [from, to), oldest first.
+    func recordings(from: Date, to: Date) -> [RecordingSegment] {
+        queue.sync {
+            var out: [RecordingSegment] = []
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT \(Store.recordingColumns) FROM recordings WHERE end > ? AND start < ? ORDER BY start ASC;", -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, to.timeIntervalSince1970)
+            while sqlite3_step(stmt) == SQLITE_ROW { out.append(recordingRow(stmt)) }
+            return out
+        }
+    }
+
+    func allRecordings() -> [RecordingSegment] {
+        recordings(from: .distantPast, to: .distantFuture)
+    }
+
+    /// (segment count, total bytes) — for the Privacy tab.
+    func recordingStats() -> (count: Int, bytes: Int64) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM recordings;", -1, &stmt, nil) == SQLITE_OK else { return (0, 0) }
+            defer { sqlite3_finalize(stmt) }
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return (0, 0) }
+            return (Int(sqlite3_column_int64(stmt, 0)), sqlite3_column_int64(stmt, 1))
+        }
+    }
+
+    func markRecordingsKept(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        queue.sync {
+            exec("BEGIN TRANSACTION;")
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE recordings SET keep = 1 WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK {
+                for id in ids { sqlite3_bind_int64(stmt, 1, id); sqlite3_step(stmt); sqlite3_reset(stmt) }
+            }
+            sqlite3_finalize(stmt)
+            exec("COMMIT;")
+        }
+    }
+
+    /// Deletes the rows, returning their file paths for on-disk removal.
+    @discardableResult
+    func deleteRecordings(ids: [Int64]) -> [String] {
+        guard !ids.isEmpty else { return [] }
+        return queue.sync {
+            var paths: [String] = []
+            var sel: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT path FROM recordings WHERE id = ?;", -1, &sel, nil) == SQLITE_OK {
+                for id in ids {
+                    sqlite3_bind_int64(sel, 1, id)
+                    if sqlite3_step(sel) == SQLITE_ROW, let c = sqlite3_column_text(sel, 0) { paths.append(String(cString: c)) }
+                    sqlite3_reset(sel)
+                }
+            }
+            sqlite3_finalize(sel)
+            exec("BEGIN TRANSACTION;")
+            var del: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM recordings WHERE id = ?;", -1, &del, nil) == SQLITE_OK {
+                for id in ids { sqlite3_bind_int64(del, 1, id); sqlite3_step(del); sqlite3_reset(del) }
+            }
+            sqlite3_finalize(del)
+            exec("COMMIT;")
+            return paths
+        }
+    }
+
+    @discardableResult
+    func deleteAllRecordings() -> [String] {
+        queue.sync {
+            var paths: [String] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT path FROM recordings;", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW { if let c = sqlite3_column_text(stmt, 0) { paths.append(String(cString: c)) } }
+            }
+            sqlite3_finalize(stmt)
+            exec("DELETE FROM recordings;")
+            purgeDeletedBytes()
+            return paths
+        }
+    }
+
+    // MARK: - Opportunities
+
+    func upsertOpportunity(_ o: Opportunity) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            let sql = "INSERT OR REPLACE INTO opportunities (key, kind, headline, rationale, entities, confidence, model, created, evidence, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, o.key, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 2, o.kind.rawValue, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 3, o.headline, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 4, o.rationale, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 5, o.entities.joined(separator: ", "), -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 6, o.confidence, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_text(stmt, 7, o.model, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_bind_double(stmt, 8, o.created.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 9, Int32(o.evidence))
+            sqlite3_bind_int(stmt, 10, o.isDemo ? 1 : 0)
+            sqlite3_step(stmt)
+        }
+    }
+
+    private func opportunityRow(_ stmt: OpaquePointer?) -> Opportunity {
+        let entities = (sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? "")
+            .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return Opportunity(
+            key: String(cString: sqlite3_column_text(stmt, 0)),
+            kind: Opportunity.Kind(rawValue: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "") ?? .manual,
+            headline: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "",
+            rationale: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+            entities: entities,
+            confidence: sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? "",
+            model: sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? "",
+            created: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)),
+            evidence: Int(sqlite3_column_int(stmt, 8)),
+            isDemo: sqlite3_column_int(stmt, 9) == 1
+        )
+    }
+
+    func opportunity(key: String) -> Opportunity? {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT key, kind, headline, rationale, entities, confidence, model, created, evidence, is_demo FROM opportunities WHERE key = ?;", -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, key, -1, Store.SQLITE_TRANSIENT)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return opportunityRow(stmt)
+        }
+    }
+
+    /// Every judgement, keyed. Demo and live are separate.
+    func opportunities(demo: Bool) -> [String: Opportunity] {
+        queue.sync {
+            var out: [String: Opportunity] = [:]
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT key, kind, headline, rationale, entities, confidence, model, created, evidence, is_demo FROM opportunities WHERE is_demo = ?;", -1, &stmt, nil) == SQLITE_OK else { return [:] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, demo ? 1 : 0)
+            while sqlite3_step(stmt) == SQLITE_ROW { let o = opportunityRow(stmt); out[o.key] = o }
+            return out
+        }
+    }
+
+    func deleteOpportunity(key: String) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "DELETE FROM opportunities WHERE key = ?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, key, -1, Store.SQLITE_TRANSIENT)
+            sqlite3_step(stmt)
+        }
+    }
+
+    func deleteOpportunities(scope: DeleteScope) {
+        queue.sync {
+            switch scope {
+            case .live: exec("DELETE FROM opportunities WHERE is_demo = 0;")
+            case .demo: exec("DELETE FROM opportunities WHERE is_demo = 1;")
+            case .all: exec("DELETE FROM opportunities;")
+            }
+            purgeDeletedBytes()
+        }
+    }
+
+    // MARK: - Input events
+
+    func insertInputEvents(_ events: [InputEvent]) {
+        guard !events.isEmpty else { return }
+        queue.sync {
+            exec("BEGIN TRANSACTION;")
+            var stmt: OpaquePointer?
+            let sql = "INSERT INTO input_events (ts, kind, app_name, bundle_id, x, y, display, label, count, is_demo) VALUES (?,?,?,?,?,?,?,?,?,?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { exec("ROLLBACK;"); return }
+            for e in events {
+                sqlite3_bind_double(stmt, 1, e.timestamp.timeIntervalSince1970)
+                sqlite3_bind_text(stmt, 2, e.kind.rawValue, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 3, e.appName, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_text(stmt, 4, e.bundleID, -1, Store.SQLITE_TRANSIENT)
+                if let x = e.x { sqlite3_bind_double(stmt, 5, x) } else { sqlite3_bind_null(stmt, 5) }
+                if let y = e.y { sqlite3_bind_double(stmt, 6, y) } else { sqlite3_bind_null(stmt, 6) }
+                sqlite3_bind_int(stmt, 7, Int32(e.display))
+                sqlite3_bind_text(stmt, 8, e.label, -1, Store.SQLITE_TRANSIENT)
+                sqlite3_bind_int(stmt, 9, Int32(e.count))
+                sqlite3_bind_int(stmt, 10, e.isDemo ? 1 : 0)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+            sqlite3_finalize(stmt)
+            exec("COMMIT;")
+        }
+    }
+
+    func inputEvents(from: Date, to: Date, demo: Bool) -> [InputEvent] {
+        queue.sync {
+            var out: [InputEvent] = []
+            var stmt: OpaquePointer?
+            let sql = "SELECT id, ts, kind, app_name, bundle_id, x, y, display, label, count FROM input_events WHERE ts >= ? AND ts < ? AND is_demo = ? ORDER BY ts ASC;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, from.timeIntervalSince1970)
+            sqlite3_bind_double(stmt, 2, to.timeIntervalSince1970)
+            sqlite3_bind_int(stmt, 3, demo ? 1 : 0)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(InputEvent(
+                    id: sqlite3_column_int64(stmt, 0),
+                    timestamp: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+                    kind: InputEvent.Kind(rawValue: sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? "") ?? .click,
+                    appName: sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? "",
+                    bundleID: sqlite3_column_text(stmt, 4).map { String(cString: $0) } ?? "",
+                    x: sqlite3_column_type(stmt, 5) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 5),
+                    y: sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 6),
+                    display: Int(sqlite3_column_int(stmt, 7)),
+                    label: sqlite3_column_text(stmt, 8).map { String(cString: $0) } ?? "",
+                    count: Int(sqlite3_column_int(stmt, 9)),
+                    isDemo: demo
+                ))
+            }
+            return out
+        }
+    }
+
+    func inputEventCount(demo: Bool) -> Int {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM input_events WHERE is_demo = ?;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, demo ? 1 : 0)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return Int(sqlite3_column_int64(stmt, 0))
+        }
+    }
+
+    func deleteInputEvents(scope: DeleteScope) {
+        queue.sync {
+            switch scope {
+            case .live: exec("DELETE FROM input_events WHERE is_demo = 0;")
+            case .demo: exec("DELETE FROM input_events WHERE is_demo = 1;")
+            case .all: exec("DELETE FROM input_events;")
+            }
+            purgeDeletedBytes()
+        }
+    }
+
+    func pruneInputEvents(olderThan cutoff: Date) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM input_events WHERE ts < ? AND is_demo = 0;", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_double(stmt, 1, cutoff.timeIntervalSince1970)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
         }
     }
 

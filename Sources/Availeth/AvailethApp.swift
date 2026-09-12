@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        AppState.shared.engine.flushRecorder()
         // Persist the in-progress span — otherwise the last (often longest)
         // stretch of work is lost on every quit, logout, and shutdown.
         AppState.shared.engine.shutdown()

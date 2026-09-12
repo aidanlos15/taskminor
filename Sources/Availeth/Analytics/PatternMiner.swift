@@ -249,32 +249,40 @@ enum PatternMiner {
     // MARK: - Scoring
 
     /// Apps whose workflows are typically automatable (structured, API-backed work).
+    /// Keyed on workflow UNIT labels (what score() receives): short app names
+    /// and the services a browser tab resolves to.
     private static let automatableApps: Set<String> = [
-        "Mail", "Microsoft Outlook", "Outlook", "Microsoft Excel", "Excel", "Numbers",
-        "Google Chrome", "Safari", "Microsoft Edge", "Arc", "Preview", "Finder",
-        "Calendar", "Notes", "QuickBooks", "Salesforce", "NetSuite",
+        "Mail", "Outlook", "Excel", "Numbers", "Sheets", "Google Sheets", "Google Docs", "Word",
+        "Chrome", "Safari", "Edge", "Arc", "Firefox", "Brave", "Preview", "Finder",
+        "Calendar", "Notes", "QuickBooks", "Salesforce", "NetSuite", "Xero", "HubSpot",
+        "Airtable", "Jira", "Stripe", "Zendesk", "Gmail", "Google Drive", "Google Calendar", "Notion",
     ]
 
-    /// Transparent 0–100 heuristic:
-    ///  - repetition weight (up to 40): more occurrences → more automatable
-    ///  - consistency weight (up to 30): low duration variance → rule-like work
-    ///  - app-mix weight (up to 20): structured/API-backed apps score higher
-    ///  - length bonus (up to 10): longer chains carry more recoverable effort
+    /// The STRUCTURAL half of the 0–100 score (at most 55). The other half is
+    /// evidence — data moved between systems, fields filled — which only the
+    /// insight builder can see, so it adds that on top (WorkflowInsighter.finalScore).
+    ///  - repetition (up to 25): saturates at 8 occurrences — ten runs of a chore
+    ///    is already plenty of repetition
+    ///  - consistency (up to 10): similar run lengths read as rule-like work;
+    ///    deliberately light, because a person pacing unevenly is not a reason
+    ///    to doubt the chore
+    ///  - app mix (up to 12): structured/API-backed apps
+    ///  - length (up to 8): longer chains carry more recoverable effort
     static func score(apps: [String], durations: [TimeInterval]) -> Int {
         let count = durations.count
-        let repetition = min(40.0, Double(count) / 20.0 * 40.0)
+        let repetition = min(25.0, Double(count) / 8.0 * 25.0)
 
         let mean = durations.reduce(0, +) / Double(max(1, count))
         let variance = durations.reduce(0) { $0 + pow($1 - mean, 2) } / Double(max(1, count))
         let cv = mean > 0 ? sqrt(variance) / mean : 1.0
-        // CV of 0 → full 30 points; CV >= 1.2 → 0 points.
-        let consistency = max(0.0, 30.0 * (1.0 - min(1.0, cv / 1.2)))
+        // CV of 0 → full 10 points; CV >= 1.5 → 0 points.
+        let consistency = max(0.0, 10.0 * (1.0 - min(1.0, cv / 1.5)))
 
-        let automatableFraction = Double(apps.filter { automatableApps.contains($0) }.count) / Double(apps.count)
-        let appMix = automatableFraction * 20.0
+        let automatableFraction = Double(apps.filter { automatableApps.contains(WorkflowUnit.shortApp($0)) }.count) / Double(apps.count)
+        let appMix = automatableFraction * 12.0
 
-        let lengthBonus = apps.count >= 5 ? 10.0 : (apps.count == 4 ? 7.0 : 4.0)
+        let lengthBonus = apps.count >= 5 ? 8.0 : (apps.count == 4 ? 6.0 : 4.0)
 
-        return min(98, max(5, Int((repetition + consistency + appMix + lengthBonus).rounded())))
+        return min(55, max(5, Int((repetition + consistency + appMix + lengthBonus).rounded())))
     }
 }

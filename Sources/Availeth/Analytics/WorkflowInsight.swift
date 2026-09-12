@@ -19,6 +19,10 @@ struct WorkflowInsight: Equatable {
     var automatable: Bool
     /// One representative run's captured moments (screenshot + narrative), in order.
     var moments: [SceneNarrative]
+    /// The wall-clock window of that representative run.
+    var representativeWindow: DateInterval? = nil
+    /// The raw facts behind the automatable read (data moved, fields filled, thinking work).
+    var evidence: WorkflowInsighter.Evidence? = nil
     /// The step map: app + the representative window/tab at that step.
     var steps: [Step]
 
@@ -67,7 +71,9 @@ enum WorkflowInsighter {
         // nothing landed inside ANY occurrence we leave this empty and show an
         // honest "no detail yet" state — never dress up content from the gaps
         // between runs as if it were a real run of this workflow.
-        let moments = occNarr.max(by: { $0.count < $1.count }) ?? []
+        let repIndex = occNarr.indices.max { occNarr[$0].count < occNarr[$1].count }
+        let moments = repIndex.map { occNarr[$0] } ?? []
+        let representativeWindow = repIndex.map { pattern.windows[$0] } ?? pattern.windows.last
 
         // Content pool for the step map and the cognitive read: ONLY narratives
         // captured inside the workflow's own occurrences (deduped by id), never
@@ -94,15 +100,22 @@ enum WorkflowInsighter {
             steps[i].content = pick?.text ?? ""
         }
 
-        let analysis = analyzeAutomation(pattern: pattern, occSpans: occSpans, narratives: runNarr)
+        let evidence = assessAutomation(pattern: pattern, occSpans: occSpans, narratives: runNarr)
+        // The miner scored structure (repetition, consistency, apps). The
+        // evidence — data moved between systems, fields filled — is what makes
+        // work automatable, so it carries the rest of the score.
+        var scored = pattern
+        scored.automationScore = finalScore(base: pattern.automationScore, evidence: evidence)
 
         return WorkflowInsight(
-            pattern: pattern,
+            pattern: scored,
             title: deriveTitle(pattern: pattern, steps: steps),
             whatItIs: deriveWhatItIs(pattern: pattern, moments: moments, steps: steps),
-            whatToAutomate: analysis.text,
-            automatable: analysis.automatable,
+            whatToAutomate: evidence.text,
+            automatable: evidence.automatable,
             moments: moments,
+            representativeWindow: representativeWindow,
+            evidence: evidence,
             steps: steps
         )
     }
@@ -162,7 +175,11 @@ enum WorkflowInsighter {
     static func deriveWhatItIs(pattern: WorkflowPattern, moments: [SceneNarrative], steps: [WorkflowInsight.Step]) -> String {
         // Prefer a coherent, TIME-ORDERED walk of one representative run — this
         // reads as an actual sequence, not a frequency jumble.
-        let ordered = dedupConsecutive(moments.map(\.text).filter { !$0.isEmpty && $0 != "Away from keyboard" })
+        // One line per moment — its first sentence — so a run reads as a
+        // sequence, not a wall of screen descriptions.
+        let ordered = dedupConsecutive(moments.map(\.text)
+            .filter { !$0.isEmpty && $0 != "Away from keyboard" }
+            .map { StoryFormat.sentences(StoryFormat.plain($0)).first ?? $0 })
         if !ordered.isEmpty {
             return ordered.prefix(4).joined(separator: " → ").capitalizingFirst()
         }
@@ -183,19 +200,59 @@ enum WorkflowInsighter {
     /// most runs. Repetition alone (e.g. bouncing between a browser and a chat
     /// app while thinking) is NOT enough: that's reading/analysis a person does,
     /// and we say so plainly instead of inventing a bogus dollar figure.
+    struct Evidence: Equatable {
+        var text: String
+        var automatable: Bool
+        /// Copy in one system, paste in another, on the runs.
+        var crossAppTransfer: Bool
+        /// Real field names entered on most runs.
+        var consistentFields: [String]
+        /// The kind of thinking work the narratives describe, when they do.
+        var cognitive: String?
+    }
+
     static func analyzeAutomation(pattern: WorkflowPattern, occSpans: [[ActivitySpan]], narratives: [SceneNarrative]) -> (text: String, automatable: Bool) {
+        let e = assessAutomation(pattern: pattern, occSpans: occSpans, narratives: narratives)
+        return (e.text, e.automatable)
+    }
+
+    /// Evidence on top of the miner's structural score (max 55):
+    ///  +30 when data was moved between two systems by copy/paste on the runs,
+    ///  +10…15 when the same real fields were filled on most runs,
+    ///  and a workflow with no mechanical evidence is capped at 45 — 10 lower
+    ///  again when the narratives read as thinking work.
+    static func finalScore(base: Int, evidence: Evidence) -> Int {
+        var s = Double(base)
+        if evidence.crossAppTransfer { s += 30 }
+        if !evidence.consistentFields.isEmpty { s += min(15, 8 + Double(evidence.consistentFields.count) * 2) }
+        if !evidence.automatable {
+            s = min(s, 45)
+            if evidence.cognitive != nil { s -= 10 }
+        }
+        return min(98, max(5, Int(s.rounded())))
+    }
+
+    static func assessAutomation(pattern: WorkflowPattern, occSpans: [[ActivitySpan]], narratives: [SceneNarrative]) -> Evidence {
         let allSpans = occSpans.flatMap { $0 }
 
-        // 1. Cross-system data transfer: copy in one app, paste in a different one.
-        let copyApp = mostCommonApp(allSpans.filter { $0.shortcuts.contains("⌘C") })
-        let pasteApp = mostCommonApp(allSpans.filter { $0.shortcuts.contains("⌘V") })
-        let crossAppTransfer = copyApp != nil && pasteApp != nil && copyApp != pasteApp
+        // 1. Cross-system data transfer: copies in one unit, pastes in a
+        //    different one — by chord COUNT, so an incidental ⌘C in the
+        //    destination sheet never cancels thirty copies from the source.
+        let transfer = crossAppTransfer(allSpans)
+        let copyApp = transfer?.from, pasteApp = transfer?.to
+        let crossAppTransfer = transfer != nil
 
         // 2. Consistent structured field entry: real field names entered on most
         //    runs (not UI hint text, and not a form the user touched only once).
         let consistentFields = consistentFieldNames(occSpans)
 
-        let mechanical = crossAppTransfer || !consistentFields.isEmpty
+        // Fields alone count only when there is a real form: two or more
+        // consistent fields, or one committed with Tab/Enter on the runs.
+        let commits = allSpans.reduce(0) { acc, s in
+            let c = chordCounts(s.shortcuts); return acc + (c["Tab"] ?? 0) + (c["↵"] ?? 0)
+        }
+        let formEntry = consistentFields.count >= 2 || (consistentFields.count == 1 && commits >= pattern.occurrences)
+        let mechanical = crossAppTransfer || formEntry
 
         // 3. Cognitive signal from the narratives — reading, analysing, writing.
         let cognitive = dominantCognitiveKind(narratives)
@@ -203,24 +260,25 @@ enum WorkflowInsighter {
         var parts: [String] = []
 
         if mechanical {
-            if let copyApp, let pasteApp, crossAppTransfer {
+            if let copyApp, let pasteApp {
                 parts.append("You move data from \(copyApp) into \(pasteApp) by hand each time — an automation could transfer it directly via their APIs, removing the copy-and-paste.")
             }
-            if !consistentFields.isEmpty {
+            if formEntry {
                 parts.append("The same fields are entered on most runs (\(consistentFields.joined(separator: ", "))) — these could be auto-filled from the source instead of typed.")
             }
-            if pattern.projectionIsReliable {
-                parts.append("At the observed rate that's about \(Format.hours(pattern.estimatedHoursPerYear)) a year.")
-            }
-            return (parts.joined(separator: " "), true)
+            parts.append("At the observed rate that's about \(Format.hours(pattern.estimatedHoursPerYear)) a year.")
+            return Evidence(text: parts.joined(separator: " "), automatable: true,
+                            crossAppTransfer: crossAppTransfer, consistentFields: formEntry ? consistentFields : [], cognitive: cognitive)
         }
 
         // No mechanical evidence → be honest: this is thinking work, not a task.
         if let cognitive {
-            return ("This looks mostly like \(cognitive) — the kind of judgement and thinking work a person does, not a mechanical task. It isn't a strong automation candidate. (An AI can *assist* here, but it can't run it unattended.)", false)
+            return Evidence(text: "This looks mostly like \(cognitive) — the kind of judgement and thinking work a person does, not a mechanical task. It isn't a strong automation candidate. (An AI can *assist* here, but it can't run it unattended.)",
+                            automatable: false, crossAppTransfer: false, consistentFields: [], cognitive: cognitive)
         }
         let apps = distinct(pattern.apps.map(shortApp))
-        return ("You repeat this move between \(apps.joined(separator: ", ")), but there's no sign of data being moved or forms being filled — so it looks like navigation or reading rather than a task to automate. Turn on Storyline (Privacy tab) to capture more detail, or treat this as low-priority.", false)
+        return Evidence(text: "You repeat this move between \(apps.joined(separator: ", ")), but there's no sign of data being moved or forms being filled — so it looks like navigation or reading rather than a task to automate. Turn on Screen capture (Privacy tab) to capture more detail, or treat this as low-priority.",
+                        automatable: false, crossAppTransfer: false, consistentFields: [], cognitive: nil)
     }
 
     /// Field names that appear on at least half the occurrences, after stripping
@@ -247,7 +305,10 @@ enum WorkflowInsighter {
     /// chrome (a call-to-action, placeholder, or instruction) rather than a field.
     static func cleanFieldName(_ raw: String) -> String? {
         var s = raw.trimmingCharacters(in: .whitespaces)
+        // A search/find/filter box is navigation, not data entry.
+        if s.range(of: #"\[(search|filter)\]"#, options: [.regularExpression, .caseInsensitive]) != nil { return nil }
         s = s.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression) // drop [class]
+        if s.range(of: #"(?i)\b(search|find|filter|look ?up)\b"#, options: .regularExpression) != nil { return nil }
         s = s.replacingOccurrences(of: #"\s*\((optional|required)\)$"#, with: "", options: [.regularExpression, .caseInsensitive])
         let lower = s.lowercased()
         // Instruction / CTA / placeholder text is not a field name.
@@ -290,12 +351,50 @@ enum WorkflowInsighter {
         name.replacingOccurrences(of: "Microsoft ", with: "").replacingOccurrences(of: "Google ", with: "")
     }
 
-    /// Most common workflow UNIT among spans (site/service for browsers), so a
-    /// copy/paste transfer names "Excel → NetSuite", not "Chrome → Chrome".
-    private static func mostCommonApp(_ spans: [ActivitySpan]) -> String? {
-        var counts: [String: Int] = [:]
-        for s in spans { counts[WorkflowUnit.label(app: s.appName, title: s.windowTitle), default: 0] += 1 }
-        return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.first?.key
+    /// "⌘C×12, ⌘V×12, Tab×40" → ["⌘C": 12, "⌘V": 12, "Tab": 40]. A chord with
+    /// no count is one press. Exact tokens, so ⇧⌘C is not ⌘C.
+    static func chordCounts(_ shortcuts: String) -> [String: Int] {
+        var out: [String: Int] = [:]
+        for raw in shortcuts.split(separator: ",") {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { continue }
+            if let x = t.range(of: "×") {
+                out[String(t[..<x.lowerBound]), default: 0] += Int(t[x.upperBound...]) ?? 1
+            } else {
+                out[t, default: 0] += 1
+            }
+        }
+        return out
+    }
+
+    /// The (source, destination) pair with the most copies in one unit and
+    /// pastes in a different one, or nil when no such pair carries real
+    /// weight. Names the transfer "Excel → NetSuite", never "Chrome → Chrome".
+    static func crossAppTransfer(_ spans: [ActivitySpan]) -> (from: String, to: String)? {
+        var copies: [String: Int] = [:], pastes: [String: Int] = [:]
+        for s in spans {
+            let unit = WorkflowUnit.label(app: s.appName, title: s.windowTitle)
+            let c = chordCounts(s.shortcuts)
+            if let n = c["⌘C"], n > 0 { copies[unit, default: 0] += n }
+            if let n = c["⌘V"], n > 0 { pastes[unit, default: 0] += n }
+        }
+        var best: (from: String, to: String, weight: Int)?
+        for (from, c) in copies {
+            for (to, p) in pastes where to != from {
+                // Both ends must be habitual (at least three chords), and the
+                // pair must be the dominant direction, not a stray.
+                guard c >= 3, p >= 3 else { continue }
+                let w = min(c, p)
+                if w > (best?.weight ?? 0) || (w == (best?.weight ?? 0) && (from, to) < (best!.from, best!.to)) {
+                    best = (from, to, w)
+                }
+            }
+        }
+        guard let best else { return nil }
+        // A same-unit copy/paste that outweighs the cross-unit pair (a sheet
+        // rearranged within itself) is not a transfer between systems.
+        let within = max(copies.map { min($0.value, pastes[$0.key] ?? 0) }.max() ?? 0, 0)
+        return within > best.weight * 2 ? nil : (best.from, best.to)
     }
 
     private static func distinct(_ xs: [String]) -> [String] {

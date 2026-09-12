@@ -213,8 +213,9 @@ struct LogsView: View {
                 schemaRow("clock", "Start & end time", "When the window came to the front and when you left it. Idle time is cut off — away-from-keyboard never counts.")
                 schemaRow("app.badge", "App name & bundle ID", "Which application was in front, e.g. Google Chrome (com.google.Chrome). Captured with no special permissions.")
                 schemaRow("macwindow", "Window title", "The focused window's title bar text — only if you granted Accessibility. Empty otherwise. This is the only content-adjacent field.")
-                schemaRow("keyboard", "Keyboard & mouse activity (if enabled)", "Shortcuts used, keys/clicks counted, and which field was typed into — the structure of the work, never the characters typed.")
+                schemaRow("keyboard", "Keyboard & mouse activity (if enabled)", "Shortcuts used, keys/clicks counted, which field was typed into, and a 90-day timestamped trail of copies, pastes, saves, committed fields, clicks (with their position on screen) and typing bursts (as counts) — the structure of the work, never the characters typed.")
                 schemaRow("doc.text.magnifyingglass", "Document (if enabled)", "The name/path of the file open in the window — its identity, never its contents.")
+                schemaRow("record.circle", "Screen recording (if enabled)", "A four-frames-a-second HEVC recording in one-minute files, kept 7 days, then only the stretches of automatable work \u{2014} replayable from Workflows and Story, and included in an export.")
                 schemaRow("globe", "Website (if enabled)", "The host name of the page in a browser tab, e.g. onlinebanking.aib.ie — never the full address or the page. Used only to show the site's icon.")
                 schemaRow("tag", "Source flag", "Whether the record belongs to the demo dataset or your live capture. The two are never mixed.")
             }

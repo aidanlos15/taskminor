@@ -39,6 +39,13 @@ enum DemoData {
             // Morning email triage
             clock = append(&spans, at: clock, app: .mail, title: "Inbox", minutes: Double.random(in: 12...22, using: &rng), rng: &rng)
 
+            // Mon/Wed/Fri: next week's staff rota, kept in a spreadsheet with
+            // availability collected by email one person at a time — the shape
+            // of a process a small custom app would replace.
+            if [2, 4, 6].contains(weekday) {
+                clock = rotaWorkflow(&spans, at: clock, rng: &rng, week: 36 + (14 - dayOffset) / 7)
+            }
+
             var invoicesDone = 0
             var crmDone = 0
             let invoiceTarget = Int.random(in: 4...6, using: &rng)
@@ -190,6 +197,20 @@ enum DemoData {
                 ]
             ),
             DemoTask(
+                title: "Build next week's staff rota",
+                apps: "Microsoft Excel, Mail",
+                automatable: "Medium \u{2014} structured data entry into fields, form/tab navigation",
+                story: "The employee laid out next week's shifts in the rota spreadsheet, emailed each person to ask which days they can work, and keyed the replies back into the sheet one at a time before saving. Nothing here needs judgement once availability is known \u{2014} it is bookkeeping between a spreadsheet and an inbox.",
+                startHour: 9.5,
+                minutes: [
+                    ("Opened the staff rota spreadsheet for next week and started filling Monday's shifts.", 60, 18, "Tab\u{00D7}12, \u{21B5}\u{00D7}6", "Name, Mon, Tue, Wed"),
+                    ("Emailed a staff member to ask about their availability next week.", 40, 4, "", "To, Subject"),
+                    ("Keyed the reply into the rota and moved on to the second half of the week.", 30, 10, "Tab\u{00D7}8", "Thu, Fri, Sat"),
+                    ("Emailed another staff member about availability.", 35, 4, "", "To, Subject"),
+                    ("Entered the last shifts and saved the rota.", 24, 8, "\u{2318}S\u{00D7}1", "Sun"),
+                ]
+            ),
+            DemoTask(
                 title: "Weekly report preparation",
                 apps: "Microsoft Excel, Keynote, Mail",
                 automatable: "Medium — heavy manual typing, repetitive data entry",
@@ -315,6 +336,20 @@ enum DemoData {
         return t.addingTimeInterval(Double.random(in: 1...5, using: &rng) * 60)
     }
 
+    private static let staff = ["Sarah", "Tom", "Priya", "Liam", "Aoife"]
+
+    /// Excel rota → an availability email → back to the rota → another email → the rota.
+    private static func rotaWorkflow(_ spans: inout [ActivitySpan], at start: Date, rng: inout SplitMix64, week: Int) -> Date {
+        var t = start
+        let rota = "Staff Rota \u{2014} Week \(week).xlsx"
+        t = append(&spans, at: t, app: .excel, title: rota, minutes: Double.random(in: 3...5, using: &rng), rng: &rng, keys: 60, clicks: 18, shortcuts: "Tab\u{00D7}12, \u{21B5}\u{00D7}6", fields: "Name, Mon, Tue, Wed")
+        t = append(&spans, at: t, app: .mail, title: "Re: Availability next week \u{2014} \(staff[Int.random(in: 0..<staff.count, using: &rng)])", minutes: Double.random(in: 1...2, using: &rng), rng: &rng, keys: 40, clicks: 4, fields: "To, Subject")
+        t = append(&spans, at: t, app: .excel, title: rota, minutes: Double.random(in: 2...3, using: &rng), rng: &rng, keys: 30, clicks: 10, shortcuts: "Tab\u{00D7}8", fields: "Thu, Fri, Sat")
+        t = append(&spans, at: t, app: .mail, title: "Re: Availability next week \u{2014} \(staff[Int.random(in: 0..<staff.count, using: &rng)])", minutes: Double.random(in: 1...2, using: &rng), rng: &rng, keys: 35, clicks: 4, fields: "To, Subject")
+        t = append(&spans, at: t, app: .excel, title: rota, minutes: Double.random(in: 2...3, using: &rng), rng: &rng, keys: 24, clicks: 8, shortcuts: "\u{2318}S\u{00D7}1", fields: "Sun")
+        return t.addingTimeInterval(Double.random(in: 2...6, using: &rng) * 60)
+    }
+
     private static func crmWorkflow(_ spans: inout [ActivitySpan], at start: Date, rng: inout SplitMix64) -> Date {
         var t = start
         t = append(&spans, at: t, app: .chrome, title: "Q3 Pipeline — Salesforce", minutes: Double.random(in: 2...4, using: &rng), rng: &rng, keys: 6, clicks: 5, shortcuts: "⌘F×1, ↵×1", fields: "Account Search [search]")
@@ -341,6 +376,57 @@ enum DemoData {
     /// captured narrative, so "captured" detail exists to open) and every other
     /// sitting gets the deterministic row the labeler would write — so the demo
     /// Tasks tab shows the finished shape without a local model.
+    /// Judgements for the demo's workflows and tasks, so the "build an app"
+    /// read is on screen without the local model. Keys come from the miner
+    /// and the seeded tasks, so they match whatever the app would compute.
+    static func seedOpportunities(into store: Store) {
+        let now = Date()
+        let spans = store.spans(from: .distantPast, to: .distantFuture, demo: true)
+        for p in PatternMiner.mine(spans: spans) {
+            let titles = (p.stepLabels + p.sampleTitles).joined(separator: " ").lowercased()
+            if titles.contains("rota") {
+                store.upsertOpportunity(Opportunity(
+                    key: "wf:" + p.id, kind: .customApp,
+                    headline: "A rota app: shifts, availability requests and confirmations in one place",
+                    rationale: "The rota lives in a spreadsheet and availability is collected by email one person at a time, then keyed in by hand every week. A small app would hold the shifts, ask staff for availability itself and fill the rota from the answers.",
+                    entities: ["staff", "shifts", "availability", "weeks"], confidence: "high", model: "demo", created: now,
+                    evidence: p.occurrences, isDemo: true))
+            } else if titles.contains("netsuite") {
+                store.upsertOpportunity(Opportunity(
+                    key: "wf:" + p.id, kind: .integration,
+                    headline: "Post supplier bills into NetSuite straight from the invoice email",
+                    rationale: "The invoice number, PO number and amount are read off a PDF and re-keyed into NetSuite after a lookup in the purchase-order sheet. All three systems hold the data already; an integration can move it and leave the approval to a person.",
+                    entities: ["suppliers", "invoices", "purchase orders", "bills"], confidence: "high", model: "demo", created: now,
+                    evidence: p.occurrences, isDemo: true))
+            }
+        }
+        for t in store.taskSummaries(from: .distantPast, to: .distantFuture, demo: true) {
+            let title = t.title.lowercased()
+            if title.contains("rota") {
+                store.upsertOpportunity(Opportunity(
+                    key: "task:\(t.id)", kind: .customApp,
+                    headline: "A rota app: shifts, availability requests and confirmations in one place",
+                    rationale: "Shifts are laid out in a spreadsheet and each person is emailed for their availability, with replies keyed back in by hand. The whole loop is a form and a table \u{2014} the kind of thing a small app does without the emails.",
+                    entities: ["staff", "shifts", "availability"], confidence: "high", model: "demo", created: now,
+                    evidence: t.minuteCount, isDemo: true))
+            } else if title.contains("invoice") {
+                store.upsertOpportunity(Opportunity(
+                    key: "task:\(t.id)", kind: .integration,
+                    headline: "Post supplier bills into NetSuite straight from the invoice email",
+                    rationale: "The same fields are copied from the PDF and the purchase-order sheet into NetSuite on every invoice; an integration could do the entry and leave the approval to a person.",
+                    entities: ["invoices", "purchase orders", "bills"], confidence: "high", model: "demo", created: now,
+                    evidence: t.minuteCount, isDemo: true))
+            } else if title.contains("weekly report") {
+                store.upsertOpportunity(Opportunity(
+                    key: "task:\(t.id)", kind: .streamline,
+                    headline: "Generate the weekly report and slides from the source figures",
+                    rationale: "The report and slides have the same structure every week; a template fed from the figures would remove the rebuilding, without needing new software.",
+                    entities: ["weekly figures", "report", "slides"], confidence: "medium", model: "demo", created: now,
+                    evidence: t.minuteCount, isDemo: true))
+            }
+        }
+    }
+
     static func seedSpanLabels(into store: Store) {
         let spans = store.spans(from: .distantPast, to: .distantFuture, demo: true)
         let sessions = IntentLabeler.sessionise(spans, gap: 5 * 60).sorted { $0.start < $1.start }

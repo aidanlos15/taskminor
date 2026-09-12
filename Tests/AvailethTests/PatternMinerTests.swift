@@ -136,7 +136,7 @@ final class PatternMinerTests: XCTestCase {
             $0.apps.contains("Mail") && $0.apps.contains("Excel") && $0.apps.contains("NetSuite")
         }
         XCTAssertNotNil(invoice, "Expected the invoice chain (…Excel→NetSuite) in: \(patterns.map(\.apps))")
-        XCTAssertGreaterThanOrEqual(invoice?.occurrences ?? 0, 10)
+        XCTAssertGreaterThanOrEqual(invoice?.occurrences ?? 0, 8, "still a well-repeated chore after the rota took some mornings")
     }
 
     /// Overlapping patterns must never double-count the same activity:

@@ -74,7 +74,11 @@ struct DashboardView: View {
 
             Spacer()
 
-            captureStatusFooter.padding(12)
+            VStack(spacing: 8) {
+                captureStatusFooter
+                ExportRow(exporter: state.exporter, demo: state.showDemo) { state.exporter.run(store: state.store, hourlyRate: state.hourlyRate) }
+            }
+            .padding(12)
         }
         .padding(.top, 18)
         .frame(width: 224, alignment: .top)
@@ -217,5 +221,62 @@ struct CornerTick: View {
     var color: Color = Theme.ink4
     var body: some View {
         LShape().stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .square))
+    }
+}
+
+/// "Export automations": the sidebar control that writes everything Availeth
+/// judged automatable — and only that — to a dated folder on the Desktop,
+/// with a progress bar while the recordings are stitched and copied.
+struct ExportRow: View {
+    @ObservedObject var exporter: AutomationExporter
+    /// The dashboard is showing the demo: the export would be of REAL data, so it waits.
+    var demo: Bool = false
+    var action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if exporter.isRunning {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.arrow.up").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                    Text("Exporting automations").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text("\(Int(exporter.progress * 100))%").font(.system(size: 10.5, weight: .semibold)).numeric().foregroundStyle(Theme.ink2)
+                }
+                ProgressView(value: exporter.progress).progressViewStyle(.linear).tint(Theme.accent)
+                Text(exporter.status).font(.system(size: 10)).foregroundStyle(Theme.ink3).lineLimit(1).truncationMode(.middle)
+            } else if let url = exporter.lastExport {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.good)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Exported to Desktop").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+                        Text(url.lastPathComponent).font(.system(size: 10)).numeric().foregroundStyle(Theme.ink3).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([url]) }.controlSize(.mini)
+                    Button { exporter.clearResult() } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                        .buttonStyle(.plain).foregroundStyle(Theme.ink3)
+                }
+            } else {
+                Button(action: action) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.and.arrow.up").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Export automations").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
+                            Text(exporter.error ?? (demo ? "Switch to My activity to export your data" : "Automatable work only, to your Desktop"))
+                                .font(.system(size: 10)).foregroundStyle(exporter.error == nil ? Theme.ink3 : Theme.amber)
+                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 4)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(demo)
+                .opacity(demo ? 0.6 : 1)
+                .help("Write everything Availeth judged automatable \u{2014} summaries, captured moments and recordings \u{2014} to a folder on the Desktop. Nothing else is included.")
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .panelSkin()
     }
 }

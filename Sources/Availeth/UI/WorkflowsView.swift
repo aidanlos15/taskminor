@@ -10,7 +10,23 @@ struct WorkflowsView: View {
     @State private var insights: [WorkflowInsight] = []
     @State private var bundles: [String: String] = [:]
     @State private var sites: [String: String] = [:]
+    @State private var segments: [RecordingSegment] = []
+    @State private var opportunities: [String: Opportunity] = [:]
     @State private var selected: WorkflowInsight?
+
+    /// The judgement for a workflow: the model's when it has one, else the
+    /// evidence-based automatable read.
+    private func kind(_ insight: WorkflowInsight) -> Opportunity.Kind {
+        opportunities["wf:" + insight.pattern.id]?.kind ?? (insight.automatable ? .integration : .manual)
+    }
+    /// Priced when there is something to build or automate.
+    private func priced(_ insight: WorkflowInsight) -> Bool {
+        let k = kind(insight)
+        return k == .integration || k == .customApp
+    }
+    private func saving(_ insight: WorkflowInsight) -> Double {
+        insight.pattern.estimatedYearlySaving(hourlyRate: state.hourlyRate, minimumScore: kind(insight) == .customApp ? Opportunity.customAppFloorScore : 0)
+    }
     @State private var reloadTask: Task<Void, Never>?
 
     var body: some View {
@@ -30,7 +46,8 @@ struct WorkflowsView: View {
         .sheet(item: $selected) { insight in
             WorkflowDetailView(insight: insight, hourlyRate: state.hourlyRate,
                                storylineOn: state.engine.screenshotMode == .storyline,
-                               bundles: bundles, sites: sites)
+                               bundles: bundles, sites: sites, segments: segments,
+                               opportunity: opportunities["wf:" + insight.pattern.id])
         }
     }
 
@@ -44,32 +61,50 @@ struct WorkflowsView: View {
         let range = self.range
         let demo = state.showDemo
         let store = state.store
+        let rate = state.hourlyRate
         reloadTask = Task.detached(priority: .userInitiated) {
             try? await Task.sleep(for: .milliseconds(300))
             if Task.isCancelled { return }
             let spans = store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: demo)
             let patterns = PatternMiner.mine(spans: spans)
             let built = patterns.map { WorkflowInsighter.build($0, store: store, demo: demo) }
-                .sorted { a, b in
-                    if a.automatable != b.automatable { return a.automatable }         // real candidates first
-                    return a.pattern.automationScore > b.pattern.automationScore
-                }
             let map = LogoProvider.bundleMap(spans)
             let siteMap = LogoProvider.siteMap(spans)
             LogoProvider.shared.prewarm(units: Array(Set(built.flatMap { $0.pattern.apps })), bundles: map, sites: siteMap)
+            let recs = demo ? [] : store.recordings(from: range.startDate(), to: Date().addingTimeInterval(60))
+            let opps = store.opportunities(demo: demo)
+            let ordered = built.sorted { a, b in
+                func rank(_ i: WorkflowInsight) -> Int {
+                    switch opps["wf:" + i.pattern.id]?.kind ?? (i.automatable ? .integration : .manual) {
+                    case .integration: return 0
+                    case .customApp: return 0
+                    case .streamline: return 1
+                    case .manual: return 2
+                    }
+                }
+                if rank(a) != rank(b) { return rank(a) < rank(b) }
+                // Within a rank, by the number actually shown.
+                func money(_ i: WorkflowInsight) -> Double {
+                    let k = opps["wf:" + i.pattern.id]?.kind ?? (i.automatable ? .integration : .manual)
+                    return i.pattern.estimatedYearlySaving(hourlyRate: rate, minimumScore: k == .customApp ? Opportunity.customAppFloorScore : 0)
+                }
+                if rank(a) == 0, money(a) != money(b) { return money(a) > money(b) }
+                return a.pattern.automationScore > b.pattern.automationScore
+            }
             if Task.isCancelled { return }
-            await MainActor.run { self.insights = built; self.bundles = map; self.sites = siteMap }
+            await MainActor.run { self.insights = ordered; self.bundles = map; self.sites = siteMap; self.segments = recs; self.opportunities = opps }
         }
     }
 
     // MARK: - The map
 
-    private var reliable: [WorkflowPattern] {
-        insights.filter { $0.automatable && $0.pattern.projectionIsReliable }.map(\.pattern)
+    private var automatable: [WorkflowPattern] {
+        insights.filter { priced($0) }.map(\.pattern)
     }
 
     private var mapPanel: some View {
-        let totalSaving = reliable.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: state.hourlyRate) }
+        let totalSaving = insights.filter { priced($0) }.reduce(0.0) { $0 + saving($1) }
+        let firstRead = automatable.contains { !$0.projectionIsReliable }
         return VStack(spacing: 0) {
             // Header
             HStack(alignment: .center, spacing: 12) {
@@ -102,16 +137,22 @@ struct WorkflowsView: View {
                         .font(.system(size: 12)).numeric()
                         .foregroundStyle(Theme.ink3)
                     Spacer()
-                    if reliable.isEmpty {
-                        Text("Yearly projections appear after 2+ observed days")
+                    if automatable.isEmpty {
+                        Text("No automatable workflow yet")
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.ink3)
                     } else {
-                        HStack(alignment: .firstTextBaseline, spacing: 3) {
-                            Text("~" + Format.money(totalSaving))
-                                .font(.system(size: 22, weight: .bold)).numeric()
-                                .foregroundStyle(Theme.ink)
-                            Text("/yr").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                                Text("~" + Format.money(totalSaving))
+                                    .font(.system(size: 22, weight: .bold)).numeric()
+                                    .foregroundStyle(Theme.ink)
+                                Text("/yr").font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                            }
+                            if firstRead {
+                                Text("first read \u{2014} projected from one observed day")
+                                    .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                            }
                         }
                     }
                 }
@@ -123,13 +164,18 @@ struct WorkflowsView: View {
 
     private var footerCaption: String {
         let n = insights.count
-        let auto = insights.filter(\.automatable).count
-        return "\(n) workflow\(n == 1 ? "" : "s") \u{00B7} \(auto) automatable \u{00B7} at \(Format.money(state.hourlyRate))/h"
+        let auto = insights.filter { kind($0) == .integration }.count
+        let apps = insights.filter { kind($0) == .customApp }.count
+        var parts = ["\(n) workflow\(n == 1 ? "" : "s")", "\(auto) automatable"]
+        if apps > 0 { parts.append("\(apps) worth a custom app") }
+        parts.append("at \(Format.money(state.hourlyRate))/h")
+        return parts.joined(separator: " \u{00B7} ")
     }
 
     private func row(_ insight: WorkflowInsight, index: Int) -> some View {
         let p = insight.pattern
-        let priced = insight.automatable && p.projectionIsReliable
+        let priced = priced(insight)
+        let opp = opportunities["wf:" + p.id]
         return Button { selected = insight } label: {
             HStack(alignment: .center, spacing: 16) {
                 VStack(alignment: .leading, spacing: 9) {
@@ -137,6 +183,10 @@ struct WorkflowsView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
+                    if let opp, opp.kind == .customApp || opp.kind == .integration {
+                        Text(opp.headline)
+                            .font(.system(size: 12)).foregroundStyle(Theme.ink2).lineLimit(1)
+                    }
                     UnitChain(units: p.apps, bundles: bundles, sites: sites, stagger: Double(index) * 0.35, animating: selected == nil)
                     HStack(spacing: 5) {
                         Text("\(p.occurrences)\u{00D7}").font(.system(size: 12, weight: .semibold)).numeric().foregroundStyle(Theme.ink2)
@@ -150,7 +200,7 @@ struct WorkflowsView: View {
                 VStack(alignment: .trailing, spacing: 7) {
                     if priced {
                         HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            Text(Format.money(p.estimatedYearlySaving(hourlyRate: state.hourlyRate)))
+                            Text("~" + Format.money(saving(insight)))
                                 .font(.system(size: 18, weight: .bold)).numeric()
                                 .foregroundStyle(Theme.ink)
                             Text("/yr").font(.system(size: 11)).foregroundStyle(Theme.ink3)
@@ -158,7 +208,7 @@ struct WorkflowsView: View {
                     } else {
                         Text("\u{2014}").font(.system(size: 18, weight: .bold)).foregroundStyle(Theme.ink3)
                     }
-                    AutomationPill(automatable: insight.automatable)
+                    OpportunityPill(kind: kind(insight))
                 }
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))

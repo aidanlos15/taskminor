@@ -11,6 +11,8 @@ struct StoryView: View {
     @State private var minutesByTask: [Int64: [MinuteSummary]] = [:]
     @State private var bundles: [String: String] = [:]
     @State private var sites: [String: String] = [:]
+    @State private var segments: [RecordingSegment] = []
+    @State private var opportunities: [String: Opportunity] = [:]
     @State private var idleSeconds: TimeInterval = 0
     @State private var expanded: Set<Int64> = []
     @State private var reloadTask: Task<Void, Never>?
@@ -34,6 +36,8 @@ struct StoryView: View {
                                   minutes: minutesByTask[task.id] ?? [],
                                   bundles: bundles,
                                   sites: sites,
+                                  segments: segments,
+                                  opportunity: opportunities["task:\(task.id)"],
                                   isExpanded: expanded.contains(task.id)) {
                             withAnimation(.easeInOut(duration: 0.22)) {
                                 if expanded.contains(task.id) { expanded.remove(task.id) } else { expanded.insert(task.id) }
@@ -73,12 +77,14 @@ struct StoryView: View {
             let siteMap = LogoProvider.siteMap(spans)
             let units = Set(summaries.flatMap { StoryCard.units($0.apps) })
             LogoProvider.shared.prewarm(units: Array(units), bundles: map, sites: siteMap)
+            let recs = demo ? [] : store.recordings(from: range.startDate(), to: to)
+            let opps = store.opportunities(demo: demo)
             if Task.isCancelled { return }
             let minutes = byTask
             await MainActor.run {
                 if Task.isCancelled { return }
                 self.tasks = summaries; self.minutesByTask = minutes
-                self.idleSeconds = idle; self.bundles = map; self.sites = siteMap
+                self.idleSeconds = idle; self.bundles = map; self.sites = siteMap; self.segments = recs; self.opportunities = opps
             }
         }
     }
@@ -137,7 +143,12 @@ struct StoryCard: View {
     var minutes: [MinuteSummary]
     var bundles: [String: String]
     var sites: [String: String] = [:]
+    var segments: [RecordingSegment] = []
+    var opportunity: Opportunity? = nil
     var isExpanded: Bool
+
+    private var taskInterval: DateInterval { DateInterval(start: task.start, end: max(task.start, task.end)) }
+    private var recorded: Bool { Recordings.hasRecording(for: taskInterval, segments: segments) }
     var toggle: () -> Void
 
     /// "Google Chrome, Claude" → ["Chrome", "Claude"] — the same unit labels the
@@ -201,8 +212,12 @@ struct StoryCard: View {
                     Spacer(minLength: 12)
 
                     VStack(alignment: .trailing, spacing: 6) {
-                        LevelPill(level: read.level)
-                        Text("automatable").microLabel()
+                        if let opp = opportunity, opp.kind == .customApp {
+                            OpportunityPill(kind: .customApp)
+                        } else {
+                            LevelPill(level: read.level)
+                            Text("automatable").microLabel()
+                        }
                     }
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 11, weight: .semibold))
@@ -217,7 +232,39 @@ struct StoryCard: View {
             if isExpanded {
                 Rectangle().fill(Theme.line).frame(height: 1)
                 VStack(alignment: .leading, spacing: 14) {
+                    if recorded {
+                        Button {
+                            RecordingWindow.present(
+                                title: title,
+                                subtitle: "\(task.start.formatted(date: .abbreviated, time: .shortened)) \u{2013} \(task.end.formatted(date: .omitted, time: .shortened)) \u{00B7} \(Format.duration(task.duration))",
+                                interval: taskInterval.padded,
+                                moments: minutes.filter { !$0.text.isEmpty && $0.text != "Away from keyboard" }.map(RecordingMoment.init),
+                                segments: segments)
+                        } label: {
+                            Label("Watch this task", systemImage: "play.rectangle.fill")
+                        }
+                        .controlSize(.small)
+                    }
                     StoryMarkdown(blocks: StoryFormat.blocks(task.text))
+
+                    if let opp = opportunity {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(opp.kind == .customApp ? "\u{1F9E9} What we'd build" : "\u{1F9ED} What to do about it")
+                                .font(.system(size: 12.5, weight: .bold)).foregroundStyle(Theme.ink)
+                            HStack(alignment: .top, spacing: 8) {
+                                OpportunityPill(kind: opp.kind)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(opp.headline).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    if !opp.rationale.isEmpty {
+                                        Text(opp.rationale).font(.system(size: 12)).foregroundStyle(Theme.ink2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    if !opp.entities.isEmpty { EntityChips(entities: opp.entities) }
+                                }
+                            }
+                        }
+                    }
 
                     // The automation read, plainly.
                     VStack(alignment: .leading, spacing: 6) {

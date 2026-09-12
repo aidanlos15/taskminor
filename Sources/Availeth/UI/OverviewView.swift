@@ -7,7 +7,8 @@ struct OverviewView: View {
 
     // All aggregates are computed once per data change in reload(), never in body.
     @State private var spans: [ActivitySpan] = []
-    @State private var patterns: [WorkflowPattern] = []
+    @State private var insights: [WorkflowInsight] = []
+    @State private var opportunities: [String: Opportunity] = [:]
     @State private var appTotals: [AppTotal] = []
     @State private var tasks: [TaskGroup] = []
     @State private var hourly: [HourlyActivity] = []
@@ -67,7 +68,8 @@ struct OverviewView: View {
         let range = self.range, demo = state.showDemo, store = state.store
         reloadTask = Task.detached(priority: .userInitiated) {
             let loaded = store.spans(from: range.startDate(), to: Date().addingTimeInterval(60), demo: demo)
-            let patterns = PatternMiner.mine(spans: loaded)
+            let insights = PatternMiner.mine(spans: loaded).map { WorkflowInsighter.build($0, store: store, demo: demo) }
+            let opps = store.opportunities(demo: demo)
             let totals = Analytics.timeByApp(loaded)
             let tasks = Analytics.taskGroups(loaded)
             let (hourly, hourlyApps) = Self.foldHourly(Analytics.hourlyActivity(loaded))
@@ -87,7 +89,7 @@ struct OverviewView: View {
             if Task.isCancelled { return }
             await MainActor.run {
                 if Task.isCancelled { return }
-                self.spans = loaded; self.patterns = patterns; self.appTotals = totals; self.tasks = tasks
+                self.spans = loaded; self.insights = insights; self.opportunities = opps; self.appTotals = totals; self.tasks = tasks
                 self.hourly = hourly; self.hourlyApps = hourlyApps; self.daily = daily
                 self.totalTime = Analytics.totalTime(loaded)
                 self.bundles = bundles; self.colors = colors
@@ -132,8 +134,13 @@ struct OverviewView: View {
     // MARK: - Stat row
 
     private var statRow: some View {
-        let reliable = patterns.filter(\.projectionIsReliable)
-        let potential = reliable.reduce(0.0) { $0 + $1.estimatedYearlySaving(hourlyRate: state.hourlyRate) }
+        // Priced like the Workflows tab: automatable by evidence, or judged worth an app.
+        let priced = insights.compactMap { i -> (WorkflowPattern, Opportunity.Kind)? in
+            let k = opportunities["wf:" + i.pattern.id]?.kind ?? (i.automatable ? .integration : .manual)
+            return (k == .integration || k == .customApp) ? (i.pattern, k) : nil
+        }
+        let candidates = priced.map(\.0)
+        let potential = priced.reduce(0.0) { $0 + $1.0.estimatedYearlySaving(hourlyRate: state.hourlyRate, minimumScore: $1.1 == .customApp ? Opportunity.customAppFloorScore : 0) }
 
         return LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 14)], spacing: 14) {
             StatCard(
@@ -152,8 +159,10 @@ struct OverviewView: View {
                 icon: "sparkles",
                 value: potential > 0 ? "~" + Format.money(potential) : "—",
                 label: "Automation potential",
-                detail: patterns.isEmpty ? "no workflows yet"
-                    : (potential > 0 ? "\(patterns.count) workflows detected" : "needs 2+ observed days"),
+                detail: insights.isEmpty ? "no workflows yet"
+                    : (candidates.contains { !$0.projectionIsReliable }
+                        ? "\(candidates.count) automatable \u{00B7} first read, 1 observed day"
+                        : "\(insights.count) workflow\(insights.count == 1 ? "" : "s") \u{00B7} \(candidates.count) automatable"),
                 accent: potential > 0
             )
         }

@@ -35,6 +35,16 @@ final class InputMonitor {
     /// generic, content-free description of the action.
     var onAction: ((String) -> Void)?
 
+    /// A timestamped interaction event (copy/cut/paste/save, a committed field,
+    /// a click with its position, a burst of typing as a count). App fields
+    /// are left empty for the engine to fill from the current span.
+    var onEvent: ((InputEvent) -> Void)?
+
+    /// Typing is reported in bursts, not per key: a count every few seconds.
+    private var burstCount = 0
+    private var burstStart: Date?
+    private let burstSeconds: TimeInterval = 3
+
     /// Content keys typed since the last field commit — lets us tell a
     /// value-committing Tab/Enter from bare navigation.
     private var contentSinceCommit = 0
@@ -63,6 +73,10 @@ final class InputMonitor {
         // Focus moved to a different field: content typed into the previous field
         // must not count toward committing this one (avoids a false "Filled a
         // field" when the user clicks into an empty field and presses Tab).
+        // A burst in flight when focus lands on a secure field is discarded:
+        // those keys may already have been the password's.
+        if secure { burstStart = nil; burstCount = 0 }
+        else if label != fieldLabel { contentSinceCommit = 0; flushBurst() }
         if label != fieldLabel { contentSinceCommit = 0 }
         self.secure = secure
         self.fieldLabel = label
@@ -78,9 +92,20 @@ final class InputMonitor {
         }
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
+        ) { [weak self] event in
             guard let self, self.counting, !self.secure, !IsSecureEventInputEnabled() else { return }
             self.clicks += 1
+            self.flushBurst()
+            // Where on screen, in points from the top-left of the display the
+            // click landed on — position only, never what was clicked. The
+            // event's own location (screen coordinates when it has no window).
+            let loc = event.window.map { $0.convertPoint(toScreen: event.locationInWindow) } ?? event.locationInWindow
+            if let screen = NSScreen.screens.first(where: { NSMouseInRect(loc, $0.frame, false) }) {
+                let display = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue ?? 0
+                let button = event.type == .rightMouseDown ? "right" : (event.type == .otherMouseDown ? "middle" : "")
+                self.onEvent?(InputEvent(timestamp: Date(), kind: .click, appName: "", bundleID: "",
+                                         x: Double(loc.x - screen.frame.minX), y: Double(screen.frame.maxY - loc.y), display: display, label: button))
+            }
         }
     }
 
@@ -111,7 +136,17 @@ final class InputMonitor {
             let name = shortcutName(event)
             shortcutCounts[name, default: 0] += 1
             // Meaningful data-movement / save actions are capture triggers.
-            if let action = Self.actionForShortcut(name) { onAction?(action) }
+            // By key code, so ⌘C is a copy on any keyboard layout.
+            let byCode: InputEvent.Kind? = flags.contains(.command) && !flags.contains(.control) && !flags.contains(.option) && !flags.contains(.shift)
+                ? [Int(kVK_ANSI_C): .copy, Int(kVK_ANSI_X): .cut, Int(kVK_ANSI_V): .paste, Int(kVK_ANSI_S): .save][Int(event.keyCode)] : nil
+            if let kind = byCode {
+                flushBurst()
+                onAction?(["copy": "Copied", "cut": "Cut", "paste": "Pasted", "save": "Saved"][kind.rawValue] ?? "")
+                onEvent?(InputEvent(timestamp: Date(), kind: kind, appName: "", bundleID: "", label: fieldLabel))
+            } else if let action = Self.actionForShortcut(name) {
+                flushBurst()
+                onAction?(action)
+            }
             return
         }
         // Navigation / control keys — identified by keyCode, no character read.
@@ -120,7 +155,13 @@ final class InputMonitor {
             // Tab/Enter after typing = committing a value into a field.
             if (navName == "Tab" || navName == "↵"), contentSinceCommit > 0 {
                 contentSinceCommit = 0
+                flushBurst()
                 onAction?("Filled a field")
+                // Tab always commits a field; Enter only in a labelled field —
+                // in an editor, a terminal or a chat it is just a new line.
+                if navName == "Tab" || !fieldLabel.isEmpty {
+                    onEvent?(InputEvent(timestamp: Date(), kind: .commit, appName: "", bundleID: "", label: fieldLabel))
+                }
             }
             return
         }
@@ -128,6 +169,18 @@ final class InputMonitor {
         keystrokes += 1
         contentSinceCommit += 1
         attributeField()
+        let now = Date()
+        if let s = burstStart, now.timeIntervalSince(s) >= burstSeconds { flushBurst() }
+        if burstStart == nil { burstStart = now }
+        burstCount += 1
+    }
+
+    /// Emits the typing burst in progress (count + field label), if any.
+    private func flushBurst() {
+        guard let start = burstStart, burstCount > 0 else { burstStart = nil; burstCount = 0; return }
+        onEvent?(InputEvent(timestamp: start, kind: .typing, appName: "", bundleID: "", label: fieldLabel, count: burstCount))
+        burstStart = nil
+        burstCount = 0
     }
 
     /// Maps a shortcut name to a generic action label worth capturing, or nil.
@@ -199,6 +252,7 @@ final class InputMonitor {
 
     /// Reads and clears everything accumulated for the closing span.
     func drain() -> (keystrokes: Int, clicks: Int, shortcuts: String, fields: String) {
+        flushBurst()
         let summary = (keystrokes, clicks, shortcutSummary(), fieldOrder.prefix(8).joined(separator: ", "))
         reset()
         return summary
@@ -215,6 +269,8 @@ final class InputMonitor {
         fieldClass = nil
         contentSinceCommit = 0
         lastRefreshRequest = .distantPast
+        burstStart = nil
+        burstCount = 0
     }
 
     /// "⌘C×12, ⌘V×12, Tab×40, ↵×6" — top chords and nav keys by frequency.

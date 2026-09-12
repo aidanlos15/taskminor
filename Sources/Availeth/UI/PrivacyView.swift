@@ -20,8 +20,14 @@ struct PrivacyView: View {
         var parts = ["\(liveSpanCount) activity records"]
         if liveNarrativeCount > 0 { parts.append("\(liveNarrativeCount) storyline notes") }
         if liveScreenshotCount > 0 { parts.append("\(liveScreenshotCount) thumbnails") }
+        if recordingStats.count > 0 {
+            parts.append("\(ByteCountFormatter.string(fromByteCount: recordingStats.bytes, countStyle: .file)) of recordings")
+        }
+        if liveEventCount > 0 { parts.append("\(liveEventCount) input events") }
         return parts.joined(separator: " · ") + " captured"
     }
+    @State private var recordingStats: (count: Int, bytes: Int64) = (0, 0)
+    @State private var liveEventCount = 0
 
     /// Console hairline used to separate rows within a panel.
     private var hairline: some View {
@@ -62,6 +68,8 @@ struct PrivacyView: View {
         liveSpanCount = state.liveSpanCount
         liveNarrativeCount = state.store.narrativeCount(demo: false)
         liveScreenshotCount = state.store.screenshotCount(demo: false)
+        recordingStats = state.store.recordingStats()
+        liveEventCount = state.store.inputEventCount(demo: false)
     }
 
     private func refreshExclusionNames() {
@@ -186,7 +194,7 @@ struct PrivacyView: View {
             captureRow(
                 icon: "keyboard",
                 title: "Keyboard & mouse activity",
-                description: "Which shortcuts and fields a task uses — never the keys you type.",
+                description: "Which shortcuts and fields a task uses, and a 90-day trail of when you copy, paste, save, click (where on screen) or type (as counts) — never the keys you type.",
                 on: Binding(
                     get: { state.engine.telemetryMode != .off },
                     set: { state.engine.telemetryMode = $0 ? .deep : .off }
@@ -255,6 +263,27 @@ struct PrivacyView: View {
                                           AXReader.requestTrust()
                                           openSettings("com.apple.preference.security?Privacy_Accessibility")
                                       })
+                }
+            }
+
+            hairline
+
+            // Screen recording — the replayable record of automatable work.
+            captureRow(
+                icon: "record.circle",
+                title: "Screen recording (kept for automatable work)",
+                description: "A four-frames-a-second recording of your screen, kept 7 days \u{2014} then only the stretches of work Availeth judged automatable, so you can replay exactly what happened.",
+                on: Binding(get: { state.engine.screenRecordingEnabled }, set: { state.engine.screenRecordingEnabled = $0 })
+            ) {
+                if state.engine.screenRecordingEnabled {
+                    if !screenRecordingGranted {
+                        permissionWarning("Needs Screen Recording. Granted it already? macOS applies it after a relaunch.",
+                                          grant: {
+                                              Permissions.requestScreenRecording()
+                                              openSettings("com.apple.preference.security?Privacy_ScreenCapture")
+                                          }, relaunch: true)
+                    }
+                    subNote("Never in excluded apps, password fields, the lock screen, or while you're away. Stays on this Mac unless you export it. About 8 GB at most.")
                 }
             }
 
@@ -553,7 +582,7 @@ struct PrivacyView: View {
                 ("keyboard", "Keystroke content — the characters typed are never recorded, only counted"),
                 ("doc.text", "File contents — only a document's name and path, never the bytes inside"),
                 ("mic.slash", "Microphone or camera"),
-                ("network.slash", "Anything sent off this Mac — Storyline sends frames only to a local model on 127.0.0.1, which never leaves the machine; nothing goes to the internet"),
+                ("network.slash", "Anything sent off this Mac — Storyline sends frames only to a local model on 127.0.0.1, which never leaves the machine; nothing goes to the internet. Recordings leave only when you export them yourself"),
                 ("eye.slash", "Anything at all from excluded apps — their windows are cut from screenshots too"),
             ]
             VStack(alignment: .leading, spacing: 8) {

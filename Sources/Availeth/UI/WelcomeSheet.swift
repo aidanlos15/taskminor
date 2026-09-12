@@ -204,6 +204,20 @@ struct WelcomeSheet: View {
 
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
+                        Text("Screen recording (kept for automatable work)").font(.callout.weight(.medium)).foregroundStyle(Theme.ink)
+                        Text("Four frames a second, kept 7 days, then only the parts of work that could be automated \u{2014} so you can replay it. Stays on this Mac.")
+                            .font(.caption).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Toggle("", isOn: Binding(get: { state.engine.screenRecordingEnabled }, set: { state.engine.screenRecordingEnabled = $0 }))
+                        .toggleStyle(.switch).labelsHidden()
+                }
+
+                Rectangle().fill(Theme.line).frame(height: 1)
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text("Website identity (icons only)").font(.callout.weight(.medium)).foregroundStyle(Theme.ink)
                         Text("Only a browser tab's host name, so tasks show the site's own icon \u{2014} read from your browser's cache on this Mac, never the internet.")
                             .font(.caption).foregroundStyle(Theme.ink2)

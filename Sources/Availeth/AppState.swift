@@ -54,9 +54,14 @@ final class AppState: ObservableObject {
     let synthesizer: Synthesizer
     /// Names sittings of work by intent for the Tasks tab (same local model).
     let labeler: IntentLabeler
+    /// Judges each workflow/task: automate, build an app, streamline, or leave it.
+    let assessor: OpportunityAssessor
 
     private var cancellables: Set<AnyCancellable> = []
     private var synthTimer: Timer?
+    private var retentionTimer: Timer?
+    /// Exports everything Availeth judged automatable to a folder on the Desktop.
+    let exporter = AutomationExporter()
     /// The in-flight synthesis → labelling chain; a tick is skipped while the
     /// previous one is still running, so the two never overlap on the model.
     private var pipelineTask: Task<Void, Never>?
@@ -68,6 +73,7 @@ final class AppState: ObservableObject {
         let interpreter = OllamaInterpreter()
         self.synthesizer = Synthesizer(store: store, interpreter: interpreter)
         self.labeler = IntentLabeler(store: store, interpreter: interpreter)
+        self.assessor = OpportunityAssessor(store: store, interpreter: interpreter)
         SiteIconStore.shared.attach(store: store)
 
         let defaults = UserDefaults.standard
@@ -95,6 +101,9 @@ final class AppState: ObservableObject {
         engine.onIdleRecorded = { [weak self] in
             DispatchQueue.main.async { self?.dataVersion += 1 }
         }
+        engine.onRecordingSaved = { [weak self] in
+            DispatchQueue.main.async { self?.dataVersion += 1 }
+        }
         // A site's icon arrived: forget the lettermark and let every screen repaint.
         SiteIconStore.shared.onIconStored = { [weak self] domain in
             DispatchQueue.main.async {
@@ -113,7 +122,7 @@ final class AppState: ObservableObject {
         // The demo generator changed (Claude sittings + intent labels): rebuild
         // the demo dataset once for installs that seeded the older one. A fresh
         // install seeds below instead and records the version.
-        let demoVersion = 2
+        let demoVersion = 3
         let seededVersion = UserDefaults.standard.integer(forKey: "availeth.demoVersion")
         if seededVersion < demoVersion, store.spanCount(demo: true) > 0 {
             resetDemoData()
@@ -133,6 +142,9 @@ final class AppState: ObservableObject {
             if store.spanLabelCount(demo: true) == 0 {
                 DemoData.seedSpanLabels(into: store)
             }
+            if store.opportunities(demo: true).isEmpty {
+                DemoData.seedOpportunities(into: store)
+            }
         }
         UserDefaults.standard.set(demoVersion, forKey: "availeth.demoVersion")
 
@@ -146,6 +158,13 @@ final class AppState: ObservableObject {
             store.normaliseAppNames()
             UserDefaults.standard.set(purgeVersion, forKey: "availeth.systemPurgeVersion")
         }
+        // The judgement rules changed (evidence-guarded verdicts): re-judge
+        // live work under the current rules, once.
+        let judgementVersion = 2
+        if UserDefaults.standard.integer(forKey: "availeth.opportunityVersion") < judgementVersion {
+            store.deleteOpportunities(scope: .live)
+            UserDefaults.standard.set(judgementVersion, forKey: "availeth.opportunityVersion")
+        }
         // Honor a persisted Stop: capture never silently restarts after the
         // user turned it off. (An expired pause resumes; an active one holds.)
         if engine.shouldObserveOnLaunch {
@@ -157,11 +176,41 @@ final class AppState: ObservableObject {
         dataVersion += 1
         refreshTodayTopApps()
 
+        // Start at login unless the user has said otherwise — the app is only
+        // useful when it's there for the whole working day. Once: their choice
+        // in the Privacy tab is respected from then on.
+        if Bundle.main.bundleURL.path.hasPrefix("/Applications/"),
+           !UserDefaults.standard.bool(forKey: "availeth.launchAtLoginDefaulted"),
+           setLaunchAtLogin(true) == nil {
+            UserDefaults.standard.set(true, forKey: "availeth.launchAtLoginDefaulted")
+        }
+
+        // Recording retention: pin segments to automatable work, drop the rest
+        // after the hold window, keep the disk budget. Every ten minutes, off-main.
+        let r = Timer(timeInterval: 600, repeats: true) { [weak self] _ in self?.runRecordingRetention() }
+        RunLoop.main.add(r, forMode: .common)
+        retentionTimer = r
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.runRecordingRetention() }
+
         // Periodically fuse raw signals into minute → task summaries (local model).
         let t = Timer(timeInterval: 90, repeats: true) { [weak self] _ in self?.runSynthesis() }
         RunLoop.main.add(t, forMode: .common)
         synthTimer = t
         runSynthesis()
+    }
+
+    private var retentionRunning = false
+    private func runRecordingRetention() {
+        guard !retentionRunning else { return }
+        retentionRunning = true
+        let store = self.store
+        Task.detached(priority: .utility) { [weak self] in
+            let plan = Recordings.retentionPass(store: store)
+            await MainActor.run {
+                self?.retentionRunning = false
+                if !plan.delete.isEmpty || !plan.pin.isEmpty { self?.dataVersion += 1 }
+            }
+        }
     }
 
     private func runSynthesis() {
@@ -170,6 +219,7 @@ final class AppState: ObservableObject {
             guard let self else { return }
             await self.synthesizer.run()
             await self.labeler.run()
+            await self.assessor.run()
             await MainActor.run {
                 self.dataVersion += 1
                 self.pipelineTask = nil
@@ -196,11 +246,14 @@ final class AppState: ObservableObject {
     func deleteLiveData() {
         store.deleteLiveData()
         engine.purgeAllLiveScreenshots()
+        store.deleteInputEvents(scope: .live)   // the largest table first, so the vacuums that follow are cheap
         store.deleteSummaries(scope: .live)
         store.deleteIdleSessions(scope: .live)
+        store.deleteOpportunities(scope: .live)
         // Live span labels went with their spans (deleteLiveData sweeps orphans).
         SiteIconStore.shared.purgeAll()
         LogoProvider.shared.invalidateAllSites()
+        engine.purgeAllRecordings()
         engine.discardCurrentAndRefresh()
         dataVersion += 1
         refreshTodayTopApps()
@@ -211,11 +264,13 @@ final class AppState: ObservableObject {
         store.deleteNarratives(scope: .demo)
         store.deleteIdleSessions(scope: .demo)
         store.deleteSummaries(scope: .demo)
+        store.deleteOpportunities(scope: .demo)
         store.insertBatch(DemoData.generate())
         DemoData.generateNarratives().forEach { store.insertNarrative($0) }
         DemoData.generateIdleSessions().forEach { store.insertIdleSession($0) }
         DemoData.seedSummaries(into: store)
         DemoData.seedSpanLabels(into: store)
+        DemoData.seedOpportunities(into: store)
         dataVersion += 1
     }
 

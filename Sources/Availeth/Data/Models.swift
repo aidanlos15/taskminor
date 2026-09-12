@@ -293,6 +293,106 @@ struct SpanLabel: Identifiable, Equatable {
     var isDemo: Bool = false
 }
 
+/// What to do about one recurring piece of work, as judged by the local
+/// model from the evidence: automate it between the systems it already uses,
+/// build a small custom app because the process is run by hand on generic
+/// tools, streamline it, or leave it to a person.
+struct Opportunity: Identifiable, Equatable {
+    enum Kind: String, CaseIterable {
+        case integration, customApp, streamline, manual
+
+        /// The pill.
+        var label: String {
+            switch self {
+            case .integration: return "AUTOMATABLE"
+            case .customApp: return "BUILD AN APP"
+            case .streamline: return "STREAMLINE"
+            case .manual: return "NEEDS A PERSON"
+            }
+        }
+        var title: String {
+            switch self {
+            case .integration: return "Automate it between the systems it already uses"
+            case .customApp: return "Build a small custom app for this process"
+            case .streamline: return "Streamline it \u{2014} a template or a simpler process"
+            case .manual: return "A person has to do this"
+            }
+        }
+    }
+
+    /// A process a custom app would replace recovers most of its time even
+    /// when the structural score is modest: the floor every surface prices at.
+    static let customAppFloorScore = 60
+
+    /// "wf:<pattern id>" or "task:<task id>".
+    var id: String { key }
+    var key: String
+    var kind: Kind
+    /// One line: what to build or automate.
+    var headline: String
+    /// Why, grounded in the evidence.
+    var rationale: String
+    /// The things the process is about ("staff", "shifts", "availability").
+    var entities: [String]
+    /// "low" / "medium" / "high".
+    var confidence: String
+    var model: String
+    var created: Date
+    /// How much evidence the judgement saw (occurrences for a workflow,
+    /// minutes for a task) — re-assessed when it grows.
+    var evidence: Int
+    var isDemo: Bool = false
+}
+
+/// A timestamped interaction event — the structure of the work, never its
+/// content: a copy, cut, paste or save; a value committed into a field (its
+/// on-screen label); a click (where on screen); a burst of typing (a count).
+/// Aligned with the recording, these are what let a walkthrough be
+/// annotated: "data copied here → pasted there".
+struct InputEvent: Identifiable, Equatable {
+    enum Kind: String {
+        case copy, cut, paste, save, commit, click, typing
+    }
+    var id: Int64 = 0
+    var timestamp: Date
+    var kind: Kind
+    var appName: String
+    var bundleID: String
+    /// Click position in points from the top-left of its display; nil otherwise.
+    var x: Double? = nil
+    var y: Double? = nil
+    /// The display the click landed on (CGDirectDisplayID), 0 when unknown.
+    var display: Int = 0
+    /// Field label for commit/typing; "" otherwise.
+    var label: String = ""
+    /// Keystrokes in a typing burst; 1 otherwise.
+    var count: Int = 1
+    var isDemo: Bool = false
+}
+
+/// One minute (at most) of the continuous low-frame-rate screen recording,
+/// as an HEVC .mov on disk. Unpinned segments are deleted after the hold
+/// window; segments overlapping automatable work are kept (`keep`) so the
+/// work can be replayed.
+struct RecordingSegment: Identifiable, Hashable {
+    var id: Int64 = 0
+    var start: Date
+    var end: Date
+    var path: String
+    var bytes: Int64 = 0
+    var keep: Bool = false
+    /// The display recorded (CGDirectDisplayID) and its size in points, so a
+    /// click's (x, y) can be scaled onto the clip's pixels.
+    var display: Int = 0
+    var pointsWidth: Int = 0
+    var pointsHeight: Int = 0
+    var pixelsWidth: Int = 0
+    var pixelsHeight: Int = 0
+
+    var interval: DateInterval { DateInterval(start: start, end: max(start, end)) }
+    var url: URL { URL(fileURLWithPath: path) }
+}
+
 /// A site's icon, obtained from the browser's own on-disk favicon cache and
 /// stored as a file under Application Support/Availeth/favicons. `path` is ""
 /// for a negative result (looked, nothing there yet) so it isn't retried on
@@ -350,9 +450,14 @@ struct WorkflowPattern: Identifiable, Equatable {
     /// clearer "what happened at each step" than the bare app names.
     var stepLabels: [String] = []
 
-    /// A single (possibly partial) observed day is too thin to annualize —
-    /// the UI shows projections only when this is true.
+    /// A single (possibly partial) observed day is a thin basis to annualize
+    /// on — the projection is still shown, labelled as a first read.
     var projectionIsReliable: Bool { daysObserved >= 2 }
+
+    /// "projected from one observed day" / "projected from 5 observed workdays".
+    var projectionBasis: String {
+        daysObserved >= 2 ? "projected from \(daysObserved) observed workdays" : "projected from one observed day"
+    }
 
     /// Extrapolated hours per year, assuming the observed window is representative.
     /// daysObserved counts working days, matching the 260-workday multiplier.
@@ -362,11 +467,18 @@ struct WorkflowPattern: Identifiable, Equatable {
         return perDay * 260 / 3600 // 260 working days
     }
 
+    /// The score a verdict is priced at: the custom-app floor when that is the verdict.
+    func pricingScore(for kind: Opportunity.Kind?) -> Int {
+        kind == .customApp ? max(automationScore, Opportunity.customAppFloorScore) : automationScore
+    }
+
     /// Extrapolated yearly labour cost that automation could recover.
-    func estimatedYearlySaving(hourlyRate: Double) -> Double {
+    /// `minimumScore` lifts the recoverable fraction for a process a custom
+    /// app would replace outright, where the structural score understates it.
+    func estimatedYearlySaving(hourlyRate: Double, minimumScore: Int = 0) -> Double {
         // Assume automation recovers a fraction of the time proportional to the score,
         // capped at 85% — some human review always remains.
-        let recoverable = min(0.85, Double(automationScore) / 100.0)
+        let recoverable = min(0.85, Double(max(automationScore, minimumScore)) / 100.0)
         return estimatedHoursPerYear * hourlyRate * recoverable
     }
 }

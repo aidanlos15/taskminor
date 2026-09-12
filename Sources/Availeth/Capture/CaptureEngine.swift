@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import CoreGraphics
 
@@ -21,7 +22,10 @@ final class CaptureEngine: ObservableObject {
 
     /// Bundle IDs never observed. Persisted in UserDefaults.
     @Published var excludedBundleIDs: Set<String> {
-        didSet { UserDefaults.standard.set(Array(excludedBundleIDs), forKey: Self.exclusionsKey) }
+        didSet {
+            UserDefaults.standard.set(Array(excludedBundleIDs), forKey: Self.exclusionsKey)
+            recorder.updateExclusions(excludedBundleIDs)
+        }
     }
 
     /// Nothing is excluded by default — Availeth records everything unless the
@@ -84,6 +88,18 @@ final class CaptureEngine: ObservableObject {
     @Published var siteIdentityEnabled: Bool {
         didSet { UserDefaults.standard.set(siteIdentityEnabled, forKey: "availeth.cap.sites") }
     }
+    /// A four-frames-a-second recording of the screen, kept a week, then only
+    /// the parts of work Availeth judges automatable — so a task can be
+    /// replayed, not just described. Written only while a span would be.
+    @Published var screenRecordingEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(screenRecordingEnabled, forKey: "availeth.cap.video")
+            syncRecorder()
+        }
+    }
+    private let recorder = ScreenRecorder()
+    /// Fired (main thread) when a recording segment lands on disk.
+    var onRecordingSaved: (() -> Void)?
 
     /// How long redacted screenshots are kept before automatic deletion.
     var screenshotRetention: TimeInterval = 24 * 3600
@@ -149,6 +165,7 @@ final class CaptureEngine: ObservableObject {
     private let store: Store
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
+    private var lockObservers: [NSObjectProtocol] = []
 
     /// The span currently being accumulated.
     private var openSpan: (bundleID: String, appName: String, title: String, start: Date, docPath: String, host: String)?
@@ -192,6 +209,7 @@ final class CaptureEngine: ObservableObject {
         }
         fileTrackingEnabled = defaults.bool(forKey: "availeth.cap.files")
         siteIdentityEnabled = defaults.object(forKey: "availeth.cap.sites") as? Bool ?? true
+        screenRecordingEnabled = defaults.object(forKey: "availeth.cap.video") as? Bool ?? true
         captureDepth = defaults.string(forKey: "availeth.cap.depth").flatMap(CaptureDepth.init) ?? .detailed
 
         // Exclusions: nothing is excluded by default now. The version-3 migration
@@ -219,6 +237,49 @@ final class CaptureEngine: ObservableObject {
 
         refreshSavedToday()
         observedTodaySeconds = savedTodaySeconds
+
+        recorder.onSegmentFinished = { [weak self] segment in
+            guard let self, FileManager.default.fileExists(atPath: segment.path) else { return }
+            self.store.insertRecording(segment)
+            DispatchQueue.main.async { self.onRecordingSaved?() }
+        }
+    }
+
+    /// Keeps the recorder in step with capture: the stream runs while
+    /// observing; frames are WRITTEN only when a span would be recorded —
+    /// not paused, not away, not our own window, not an excluded or system
+    /// app, not while a password field has secure input.
+    private func syncRecorder() {
+        let shouldRun = isObserving && !suspended && !screenLocked && screenRecordingEnabled && Permissions.screenRecordingGranted
+        guard shouldRun else { recorder.stop(); return }
+        let front = NSWorkspace.shared.frontmostApplication
+        recorder.start(excludedBundleIDs: excludedBundleIDs, display: Self.displayOfFrontWindow(pid: front?.processIdentifier))
+        let bundle = front?.bundleIdentifier ?? ""
+        let blocked = bundle.isEmpty || bundle == Bundle.main.bundleIdentifier
+            || excludedBundleIDs.contains(bundle) || (front.map(SystemProcesses.isSystem) ?? false)
+        recorder.setWriting(!isPaused && idleSince == nil && !blocked && !IsSecureEventInputEnabled())
+    }
+
+    /// True between the screen locking / sleeping and unlocking / waking.
+    private var screenLocked = false
+
+    /// The display holding the front app's main window — so work on a second
+    /// monitor is recorded, not whatever the first display shows. Falls back
+    /// to the main display.
+    static func displayOfFrontWindow(pid: pid_t?) -> CGDirectDisplayID {
+        let main = CGMainDisplayID()
+        guard let pid, let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return main }
+        for w in list {
+            guard (w[kCGWindowOwnerPID as String] as? pid_t) == pid, (w[kCGWindowLayer as String] as? Int) == 0,
+                  let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"], width > 50, height > 50 else { continue }
+            let centre = CGPoint(x: x + width / 2, y: y + height / 2)
+            var ids = [CGDirectDisplayID](repeating: 0, count: 8)
+            var n: UInt32 = 0
+            if CGGetDisplaysWithPoint(centre, 8, &ids, &n) == .success, n > 0 { return ids[0] }
+            return main
+        }
+        return main
     }
 
     /// Whether capture should start automatically this launch — false only when
@@ -246,6 +307,13 @@ final class CaptureEngine: ObservableObject {
         observe(NSWorkspace.sessionDidResignActiveNotification) { [weak self] in self?.suspendCapture() }
         observe(NSWorkspace.sessionDidBecomeActiveNotification) { [weak self] in self?.resumeFromSuspension() }
         observe(NSWorkspace.willPowerOffNotification) { [weak self] in self?.closeOpenSpan() }
+        observe(NSWorkspace.screensDidSleepNotification) { [weak self] in self?.screenLocked = true; self?.syncRecorder() }
+        observe(NSWorkspace.screensDidWakeNotification) { [weak self] in self?.screenLocked = false; self?.syncRecorder() }
+        let dnc = DistributedNotificationCenter.default()
+        lockObservers = [
+            dnc.addObserver(forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.screenLocked = true; self?.syncRecorder() },
+            dnc.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in self?.screenLocked = false; self?.syncRecorder() },
+        ]
 
         let t = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
             self?.tick()
@@ -257,6 +325,7 @@ final class CaptureEngine: ObservableObject {
         syncInputMonitor()
         pruneOldScreenshots()
         tick()
+        syncRecorder()
     }
 
     func stop() {
@@ -269,10 +338,13 @@ final class CaptureEngine: ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         observers.forEach { center.removeObserver($0) }
         observers = []
+        lockObservers.forEach { DistributedNotificationCenter.default().removeObserver($0) }
+        lockObservers = []
         // Drain the final span's telemetry BEFORE tearing the monitor down.
         finalizeIdleSessionIfNeeded(returnedAt: Date())
         closeOpenSpan()
         inputMonitor.stop()
+        recorder.stop()
         pendingActionCapture?.cancel()
         // Invalidate any in-flight capture so its late completion can neither
         // store a frame nor race a capture started after a restart.
@@ -300,6 +372,7 @@ final class CaptureEngine: ObservableObject {
         inputMonitor.mode = telemetryMode
         inputMonitor.onNeedFieldRefresh = { [weak self] in self?.refreshFieldContextAsync() }
         inputMonitor.onAction = { [weak self] reason in self?.scheduleActionCapture(reason: reason) }
+        inputMonitor.onEvent = { [weak self] e in self?.bufferEvent(e) }
         let live = isObserving && !suspended && !isPaused
             && telemetryMode != .off && Permissions.inputMonitoringGranted
         if live {
@@ -307,6 +380,27 @@ final class CaptureEngine: ObservableObject {
         } else {
             inputMonitor.stop()
         }
+    }
+
+    /// Timestamped interaction events, buffered and written in batches (a click
+    /// must never cost a database round-trip on the main thread).
+    private var pendingEvents: [InputEvent] = []
+    private func bufferEvent(_ e: InputEvent) {
+        guard telemetryMode != .off else { return }
+        var ev = e
+        if let span = openSpan {
+            ev.appName = span.appName; ev.bundleID = span.bundleID
+        } else if let front = NSWorkspace.shared.frontmostApplication {
+            ev.appName = SystemProcesses.cleanAppName(front.localizedName ?? ""); ev.bundleID = front.bundleIdentifier ?? ""
+        }
+        pendingEvents.append(ev)
+        if pendingEvents.count >= 200 { flushEvents() }
+    }
+    private func flushEvents() {
+        guard !pendingEvents.isEmpty else { return }
+        let batch = pendingEvents
+        pendingEvents = []
+        store.insertInputEvents(batch)
     }
 
     /// Off-main Accessibility read of the focused field, triggered while typing.
@@ -358,6 +452,8 @@ final class CaptureEngine: ObservableObject {
     func discardCurrentAndRefresh() {
         openSpan = nil
         previousTickTitle = nil
+        pendingEvents.removeAll()   // nothing captured before the delete may land after it
+        inputMonitor.reset()
         refreshSavedToday()
         publishObservedToday()
     }
@@ -371,6 +467,7 @@ final class CaptureEngine: ObservableObject {
         inputMonitor.setCounting(false)
         syncInputMonitor() // tears the monitor down while suspended
         setCurrentAppName(nil)
+        syncRecorder()
     }
 
     private func resumeFromSuspension() {
@@ -390,6 +487,7 @@ final class CaptureEngine: ObservableObject {
     func pause(for interval: TimeInterval) {
         guard isObserving else { return }
         setPause(until: Date().addingTimeInterval(interval))
+        syncRecorder()
     }
 
     func pauseUntilTomorrow() {
@@ -397,6 +495,7 @@ final class CaptureEngine: ObservableObject {
         let cal = Calendar.current
         let tomorrow = cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date())) ?? Date().addingTimeInterval(12 * 3600)
         setPause(until: tomorrow)
+        syncRecorder()
     }
 
     func resume() {
@@ -406,6 +505,7 @@ final class CaptureEngine: ObservableObject {
         } else {
             start()
         }
+        syncRecorder()
     }
 
     private func setPause(until: Date) {
@@ -430,6 +530,7 @@ final class CaptureEngine: ObservableObject {
     private func tick() {
         guard isObserving, !suspended else { return }
         let now = Date()
+        defer { syncRecorder() }
 
         // Watchdog: a wall-clock jump means we slept or froze without closing —
         // the open span's tail is unreliable, so end it at the last healthy tick.
@@ -438,6 +539,7 @@ final class CaptureEngine: ObservableObject {
         }
         lastTickDate = now
         rolloverDayIfNeeded()
+        flushEvents()
 
         if isPaused {
             closeOpenSpan()
@@ -581,10 +683,13 @@ final class CaptureEngine: ObservableObject {
 
     private func closeOpenSpan(end: Date? = nil) {
         guard let span = openSpan else { return }
-        openSpan = nil
         let endDate = min(max(end ?? Date(), span.start), Date())
-        // Drain input telemetry regardless, so it doesn't bleed into the next span.
+        // Drain input telemetry regardless, so it doesn't bleed into the next
+        // span — while the span is still open, so a closing typing burst is
+        // attributed to THIS app.
         let input = inputMonitor.drain()
+        flushEvents()
+        openSpan = nil
         guard endDate.timeIntervalSince(span.start) >= 2 else { return }
         let telemetryOn = telemetryMode != .off
         store.insert(ActivitySpan(
@@ -815,6 +920,7 @@ final class CaptureEngine: ObservableObject {
         ScreenshotCapture.deleteFiles(store.pruneNarrativeImages(olderThan: imageCutoff))
         let textCutoff = Date().addingTimeInterval(-narrativeTextRetention)
         ScreenshotCapture.deleteFiles(store.pruneNarratives(olderThan: textCutoff))
+        store.pruneInputEvents(olderThan: textCutoff)
     }
 
     /// Records the away stretch (if long enough) when the user returns.
@@ -846,6 +952,9 @@ final class CaptureEngine: ObservableObject {
         let cutoff = Date().addingTimeInterval(-screenshotRetention)
         let paths = store.pruneScreenshots(olderThan: cutoff)
         ScreenshotCapture.deleteFiles(paths)
+        // Runs at start and after captures regardless of Storyline, so the
+        // event trail is pruned even when narration is off.
+        store.pruneInputEvents(olderThan: Date().addingTimeInterval(-narrativeTextRetention))
     }
 
     /// Deletes every live screenshot and narrative (rows + image files) — used
@@ -853,6 +962,19 @@ final class CaptureEngine: ObservableObject {
     func purgeAllLiveScreenshots() {
         ScreenshotCapture.deleteFiles(store.deleteScreenshots(scope: .live))
         ScreenshotCapture.deleteFiles(store.deleteNarratives(scope: .live))
+    }
+
+    /// On quit: close the segment being written so it stays playable.
+    func flushRecorder() { recorder.flush() }
+
+    /// Deletes every recording segment (rows + files), closing the one being
+    /// written first so it can't land afterwards.
+    func purgeAllRecordings() {
+        let store = self.store
+        recorder.flush { [weak self] in
+            Recordings.purgeAll(store: store)
+            DispatchQueue.main.async { self?.syncRecorder() }
+        }
     }
 
     private func systemIdleSeconds() -> TimeInterval {
